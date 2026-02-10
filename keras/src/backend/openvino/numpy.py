@@ -3279,9 +3279,7 @@ def unravel_index(indices, shape):
         dim_const = ov_opset.constant(dim_size, indices_dtype).output(0)
         coord = ov_opset.floor_mod(indices, dim_const).output(0)
         coords.append(coord)
-        indices = ov_opset.divide(
-            ov_opset.subtract(indices, coord).output(0), dim_const
-        ).output(0)
+        indices = ov_opset.divide(indices, dim_const).output(0)
 
     coords = list(reversed(coords))
     return tuple(OpenVINOKerasTensor(coord) for coord in coords)
@@ -3580,6 +3578,3 @@ def argpartition(x, kth, axis=-1):
         ov_opset.constant(inv_axes),
     ).output(0)
     return OpenVINOKerasTensor(result)
-
-
-

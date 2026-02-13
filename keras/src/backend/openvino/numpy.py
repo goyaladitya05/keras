@@ -977,7 +977,6 @@ def diag(x, k=0):
         diag_vec = ov_opset.gather_nd(x, indices_const)
         return OpenVINOKerasTensor(diag_vec.output(0))
 
-
     else:
         raise ValueError("diag supports only 1D or 2D tensors")
 
@@ -998,12 +997,25 @@ def diagflat(v, k=0):
     else:
         abs_k = k_val
 
-    n_plus_k = ov_opset.add(n, ov_opset.constant(abs_k, dtype=Type.i32).output(0)).output(0)
+    n_plus_k = ov_opset.add(
+        n, ov_opset.constant(abs_k, dtype=Type.i32).output(0)
+    ).output(0)
 
-    target_shape_vec = ov_opset.concat([
-        ov_opset.reshape(n_plus_k, ov_opset.constant([1], dtype=Type.i32).output(0), False).output(0),
-        ov_opset.reshape(n_plus_k, ov_opset.constant([1], dtype=Type.i32).output(0), False).output(0)
-    ], 0).output(0)
+    target_shape_vec = ov_opset.concat(
+        [
+            ov_opset.reshape(
+                n_plus_k,
+                ov_opset.constant([1], dtype=Type.i32).output(0),
+                False,
+            ).output(0),
+            ov_opset.reshape(
+                n_plus_k,
+                ov_opset.constant([1], dtype=Type.i32).output(0),
+                False,
+            ).output(0),
+        ],
+        0,
+    ).output(0)
 
     v_type = v.get_element_type()
     zero_const = ov_opset.constant(0, dtype=v_type).output(0)

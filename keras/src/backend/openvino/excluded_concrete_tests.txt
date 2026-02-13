@@ -41,7 +41,6 @@ NumpyOneInputOpsCorrectnessTest::test_conj
 NumpyOneInputOpsCorrectnessTest::test_cumprod
 NumpyOneInputOpsCorrectnessTest::test_diagflat
 NumpyOneInputOpsCorrectnessTest::test_imag
-
 NumpyOneInputOpsCorrectnessTest::test_isreal
 NumpyOneInputOpsCorrectnessTest::test_nanmax
 NumpyOneInputOpsCorrectnessTest::test_nanmean

@@ -2476,11 +2476,17 @@ def ravel(x):
     )
 
 
+def _is_complex(x):
+    """Check if input has a complex dtype."""
+    if isinstance(x, OpenVINOKerasTensor):
+        dtype = ov_to_keras_type(x.output.get_element_type())
+    else:
+        dtype = standardize_dtype(getattr(x, "dtype", type(x)))
+    return dtype in dtypes.COMPLEX_TYPES
+
+
 def real(x):
-    # TODO: Unblock complex inputs when OpenVINO supports complex128.
-    # Currently, passing complex inputs triggers a RuntimeError in core conversion.
-    # Once supported, remove the real/imag/isreal exclusions in
-    # keras/src/backend/openvino/excluded_concrete_tests.txt.
+    # TODO: Unblock when OpenVINO supports complex128 inputs
     if _is_complex(x):
         x_ov = get_ov_output(x)
         index_0 = ov_opset.constant(0, Type.i32).output(0)
@@ -2490,6 +2496,30 @@ def real(x):
     if isinstance(x, OpenVINOKerasTensor):
         return x
     return OpenVINOKerasTensor(get_ov_output(x))
+
+
+def imag(x):
+    # TODO: Unblock when OpenVINO supports complex128 inputs
+    if _is_complex(x):
+        x_ov = get_ov_output(x)
+        index_1 = ov_opset.constant(1, Type.i32).output(0)
+        axis = ov_opset.constant(-1, Type.i32).output(0)
+        imag_part = ov_opset.gather(x_ov, index_1, axis).output(0)
+        return OpenVINOKerasTensor(imag_part)
+    # For real inputs, return zeros with the same shape
+    x_ov = get_ov_output(x)
+    zero = ov_opset.constant(0, x_ov.get_element_type()).output(0)
+    zeros = ov_opset.multiply(x_ov, zero).output(0)
+    return OpenVINOKerasTensor(zeros)
+
+
+def isreal(x):
+    """Return True for each element if it has zero imaginary part."""
+    imag_part = imag(x)
+    imag_ov = get_ov_output(imag_part)
+    zero = ov_opset.constant(0, imag_ov.get_element_type()).output(0)
+    result = ov_opset.equal(imag_ov, zero).output(0)
+    return OpenVINOKerasTensor(result)
 
 
 def reciprocal(x):

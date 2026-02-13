@@ -1474,7 +1474,10 @@ def _is_complex(x):
 
 
 def imag(x):
-    # TODO: Unblock when OpenVINO supports complex128 inputs
+    # TODO: Unblock complex inputs when OpenVINO supports complex128.
+    # Currently, passing complex inputs triggers a RuntimeError in core conversion.
+    # Once supported, remove the real/imag/isreal exclusions in
+    # keras/src/backend/openvino/excluded_concrete_tests.txt.
     if _is_complex(x):
         x_ov = get_ov_output(x)
         index_1 = ov_opset.constant(1, Type.i32).output(0)
@@ -2474,7 +2477,10 @@ def ravel(x):
 
 
 def real(x):
-    # TODO: Unblock when OpenVINO supports complex128 inputs
+    # TODO: Unblock complex inputs when OpenVINO supports complex128.
+    # Currently, passing complex inputs triggers a RuntimeError in core conversion.
+    # Once supported, remove the real/imag/isreal exclusions in
+    # keras/src/backend/openvino/excluded_concrete_tests.txt.
     if _is_complex(x):
         x_ov = get_ov_output(x)
         index_0 = ov_opset.constant(0, Type.i32).output(0)

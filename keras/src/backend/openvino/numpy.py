@@ -1467,8 +1467,23 @@ def identity(n, dtype=None):
     return OpenVINOKerasTensor(identity_matrix.output(0))
 
 
+def _is_complex(x):
+    if hasattr(x, "dtype"):
+        return "complex" in str(x.dtype)
+    return False
+
+
 def imag(x):
-    raise NotImplementedError("`imag` is not supported with openvino backend")
+    if _is_complex(x):
+        x_ov = get_ov_output(x)
+        index_1 = ov_opset.constant(1, Type.i32).output(0)
+        axis = ov_opset.constant(-1, Type.i32).output(0)
+        imag_part = ov_opset.gather(x_ov, index_1, axis).output(0)
+        return OpenVINOKerasTensor(imag_part)
+    x_ov = get_ov_output(x)
+    zero = ov_opset.constant(0, x_ov.get_element_type()).output(0)
+    zeros = ov_opset.broadcast(zero, ov_opset.shape_of(x_ov)).output(0)
+    return OpenVINOKerasTensor(zeros)
 
 
 def isclose(x1, x2, rtol=1e-5, atol=1e-8, equal_nan=False):
@@ -1583,7 +1598,7 @@ def _is_inf(x, pos=True):
 
 
 def isreal(x):
-    raise NotImplementedError("`isreal` is not supported with openvino backend")
+    return equal(imag(x), 0)
 
 
 def kron(x1, x2):
@@ -2456,7 +2471,15 @@ def ravel(x):
 
 
 def real(x):
-    raise NotImplementedError("`real` is not supported with openvino backend")
+    if _is_complex(x):
+        x_ov = get_ov_output(x)
+        index_0 = ov_opset.constant(0, Type.i32).output(0)
+        axis = ov_opset.constant(-1, Type.i32).output(0)
+        real_part = ov_opset.gather(x_ov, index_0, axis).output(0)
+        return OpenVINOKerasTensor(real_part)
+    if isinstance(x, OpenVINOKerasTensor):
+        return x
+    return OpenVINOKerasTensor(get_ov_output(x))
 
 
 def reciprocal(x):

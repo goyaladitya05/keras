@@ -1467,31 +1467,6 @@ def identity(n, dtype=None):
     return OpenVINOKerasTensor(identity_matrix.output(0))
 
 
-def _is_complex(x):
-    if hasattr(x, "dtype"):
-        return "complex" in str(x.dtype)
-    return False
-
-
-def imag(x):
-    # TODO: Unblock complex inputs when OpenVINO supports complex128.
-    # Currently, passing complex inputs triggers a RuntimeError in core conversion.
-    # Once supported, remove the real/imag/isreal exclusions in
-    # keras/src/backend/openvino/excluded_concrete_tests.txt.
-    if _is_complex(x):
-        x_ov = get_ov_output(x)
-        index_1 = ov_opset.constant(1, Type.i32).output(0)
-        axis = ov_opset.constant(-1, Type.i32).output(0)
-        imag_part = ov_opset.gather(x_ov, index_1, axis).output(0)
-        return OpenVINOKerasTensor(imag_part)
-    x_ov = get_ov_output(x)
-    zeros = ov_opset.convert(x_ov, x_ov.get_element_type()).output(0)
-    zeros = ov_opset.multiply(
-        zeros, ov_opset.constant(0, x_ov.get_element_type())
-    ).output(0)
-    return OpenVINOKerasTensor(zeros)
-
-
 def isclose(x1, x2, rtol=1e-5, atol=1e-8, equal_nan=False):
     dtype = OPENVINO_DTYPES[config.floatx()]
 
@@ -1601,10 +1576,6 @@ def _is_inf(x, pos=True):
             inf = ov_opset.constant(inf_value, Type.f32).output(0)
         is_inf = ov_opset.equal(x, inf).output(0)
     return OpenVINOKerasTensor(is_inf)
-
-
-def isreal(x):
-    return equal(imag(x), 0)
 
 
 def kron(x1, x2):
@@ -2507,19 +2478,12 @@ def imag(x):
         imag_part = ov_opset.gather(x_ov, index_1, axis).output(0)
         return OpenVINOKerasTensor(imag_part)
     # For real inputs, return zeros with the same shape
-    x_ov = get_ov_output(x)
-    zero = ov_opset.constant(0, x_ov.get_element_type()).output(0)
-    zeros = ov_opset.multiply(x_ov, zero).output(0)
-    return OpenVINOKerasTensor(zeros)
+    return zeros_like(x)
 
 
 def isreal(x):
     """Return True for each element if it has zero imaginary part."""
-    imag_part = imag(x)
-    imag_ov = get_ov_output(imag_part)
-    zero = ov_opset.constant(0, imag_ov.get_element_type()).output(0)
-    result = ov_opset.equal(imag_ov, zero).output(0)
-    return OpenVINOKerasTensor(result)
+    return equal(imag(x), 0)
 
 
 def reciprocal(x):

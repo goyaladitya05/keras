@@ -1474,6 +1474,7 @@ def _is_complex(x):
 
 
 def imag(x):
+    # TODO: Unblock when OpenVINO supports complex128 inputs
     if _is_complex(x):
         x_ov = get_ov_output(x)
         index_1 = ov_opset.constant(1, Type.i32).output(0)
@@ -1481,8 +1482,10 @@ def imag(x):
         imag_part = ov_opset.gather(x_ov, index_1, axis).output(0)
         return OpenVINOKerasTensor(imag_part)
     x_ov = get_ov_output(x)
-    zero = ov_opset.constant(0, x_ov.get_element_type()).output(0)
-    zeros = ov_opset.broadcast(zero, ov_opset.shape_of(x_ov)).output(0)
+    zeros = ov_opset.convert(x_ov, x_ov.get_element_type()).output(0)
+    zeros = ov_opset.multiply(
+        zeros, ov_opset.constant(0, x_ov.get_element_type())
+    ).output(0)
     return OpenVINOKerasTensor(zeros)
 
 
@@ -2471,6 +2474,7 @@ def ravel(x):
 
 
 def real(x):
+    # TODO: Unblock when OpenVINO supports complex128 inputs
     if _is_complex(x):
         x_ov = get_ov_output(x)
         index_0 = ov_opset.constant(0, Type.i32).output(0)

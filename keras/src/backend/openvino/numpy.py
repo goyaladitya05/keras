@@ -14,6 +14,7 @@ from keras.src.backend.openvino.core import OpenVINOKerasTensor
 from keras.src.backend.openvino.core import (
     align_operand_types as _align_operand_types,
 )
+from keras.src.backend.openvino.core import convert_to_numpy
 from keras.src.backend.openvino.core import convert_to_tensor
 from keras.src.backend.openvino.core import get_ov_output
 from keras.src.backend.openvino.core import ov_to_keras_type
@@ -4110,8 +4111,13 @@ def select(condlist, choicelist, default=0):
 
 
 def slogdet(x):
-    raise NotImplementedError(
-        "`slogdet` is not supported with openvino backend"
+    # OpenVINO has no native det/slogdet op; fall back to numpy
+    x = get_ov_output(x)
+    x_np = convert_to_numpy(OpenVINOKerasTensor(x))
+    sign, logabsdet = np.linalg.slogdet(x_np)
+    return (
+        OpenVINOKerasTensor(ov_opset.constant(np.array(sign)).output(0)),
+        OpenVINOKerasTensor(ov_opset.constant(np.array(logabsdet)).output(0)),
     )
 
 

@@ -130,9 +130,8 @@ def get_ov_output(x, ov_type=None):
     elif isinstance(x, Tensor):
         x = ov_opset.constant(x.data).output(0)
     else:
-        raise ValueError(
-            "unsupported type of `x` to create ov.Output: {}".format(type(x))
-        )
+        # Fallback: try converting to numpy (handles JAX/TF tensors, etc.)
+        x = ov_opset.constant(np.array(x)).output(0)
     return x
 
 
@@ -818,7 +817,7 @@ def convert_to_numpy(x):
         else:
             return x.value.data
     if not isinstance(x, OpenVINOKerasTensor):
-        raise ValueError(f"unsupported type {type(x)} for `convert_to_numpy`.")
+        return np.asarray(x)
     # if the tensor is backed by a Constant OV node, extract
     # its data array directly without compiling a model.
     try:

@@ -1169,10 +1169,237 @@ def _ctc_beam_search_decode(
     top_paths=1,
     mask_index=0,
 ):
-    raise NotImplementedError(
-        "OpenVINO CTC beam-search decode is not yet supported. "
-        "The current Keras beam-search algorithm requires path dedup/merge "
-        "via `unique`, and OpenVINO backend `unique` is not implemented yet."
+    from keras.src.backend.openvino.core import scatter_update
+
+    inputs = get_ov_output(inputs)
+    sequence_lengths = get_ov_output(sequence_lengths)
+
+    inputs_tensor = OpenVINOKerasTensor(inputs)
+    batch_size, max_seq_len, num_classes = inputs_tensor.shape
+    inputs_tensor = log_softmax(inputs_tensor, axis=-1)
+
+    seqlen_mask = (
+        onp.arange(max_seq_len)[None, :]
+        >= OpenVINOKerasTensor(sequence_lengths)[:, None]
+    )
+
+    if mask_index is None:
+        mask_index = num_classes - 1
+
+    # Flip inputs so that argsort tie-breaking matches TensorFlow convention
+    inputs_tensor = onp.flip(inputs_tensor, axis=2)
+    mask_index = num_classes - mask_index - 1
+
+    _pad = -1
+
+    init_paths = onp.full(
+        (batch_size, 2 * beam_width, max_seq_len), _pad, dtype="int32"
+    )
+
+    num_init_paths = min(num_classes, beam_width)
+    max_classes = onp.argsort(inputs_tensor[:, 0], axis=1)[:, -num_init_paths:]
+    init_classes = onp.where(
+        max_classes == mask_index,
+        OpenVINOKerasTensor(get_ov_output(_pad, Type.i32)),
+        max_classes,
+    )
+
+    # Set init_paths[:, :num_init_paths, 0] = init_classes
+    batch_idx = onp.repeat(
+        onp.arange(batch_size, dtype="int32"), num_init_paths
+    )
+    path_idx = onp.tile(
+        onp.arange(num_init_paths, dtype="int32"), (batch_size,)
+    )
+    time_idx = onp.zeros(batch_size * num_init_paths, dtype="int32")
+    scatter_indices = onp.stack([batch_idx, path_idx, time_idx], axis=1)
+    init_classes_flat = onp.reshape(init_classes, (-1,))
+    init_paths = OpenVINOKerasTensor(
+        ov_opset.scatter_nd_update(
+            get_ov_output(init_paths),
+            get_ov_output(scatter_indices),
+            get_ov_output(init_classes_flat),
+        ).output(0)
+    )
+
+    init_scores = onp.full(
+        (batch_size, 2 * beam_width), float("-inf"), dtype=inputs_tensor.dtype
+    )
+    init_score_values = onp.take_along_axis(
+        inputs_tensor[:, 0], max_classes, axis=1
+    )
+    # Set init_scores[:, :num_init_paths] = init_score_values
+    batch_idx_s = onp.repeat(
+        onp.arange(batch_size, dtype="int32"), num_init_paths
+    )
+    path_idx_s = onp.tile(
+        onp.arange(num_init_paths, dtype="int32"), (batch_size,)
+    )
+    scatter_indices_s = onp.stack([batch_idx_s, path_idx_s], axis=1)
+    init_score_values_flat = onp.reshape(init_score_values, (-1,))
+    init_scores = OpenVINOKerasTensor(
+        ov_opset.scatter_nd_update(
+            get_ov_output(init_scores),
+            get_ov_output(scatter_indices_s),
+            get_ov_output(init_score_values_flat),
+        ).output(0)
+    )
+
+    init_masked = init_paths[:, :, 0] == _pad
+
+    def _extend_paths(paths, scores, masked, x):
+        paths = onp.repeat(paths, num_classes, axis=0)
+        scores = onp.repeat(scores, num_classes)
+        masked = onp.repeat(masked, num_classes)
+
+        pad_mask = OpenVINOKerasTensor(
+            ov_opset.convert(get_ov_output(paths == _pad), Type.i32).output(0)
+        )
+        path_tail_index = onp.argmax(pad_mask, axis=1)
+        paths_arange = onp.arange(2 * beam_width * num_classes, dtype="int32")
+
+        gather_idx = onp.stack([paths_arange, path_tail_index - 1], axis=1)
+        path_tails = OpenVINOKerasTensor(
+            ov_opset.gather_nd(
+                get_ov_output(paths), get_ov_output(gather_idx)
+            ).output(0)
+        )
+        path_tails = onp.where(path_tail_index == 0, _pad, path_tails)
+
+        classes = onp.arange(num_classes, dtype="int32")
+        # Set classes[mask_index] = _pad
+        mi_idx = onp.reshape(
+            OpenVINOKerasTensor(get_ov_output(mask_index, Type.i32)), (1, 1)
+        )
+        classes = OpenVINOKerasTensor(
+            ov_opset.scatter_nd_update(
+                get_ov_output(classes),
+                get_ov_output(mi_idx),
+                get_ov_output(np.array([_pad], dtype=np.int32)),
+            ).output(0)
+        )
+        classes = onp.tile(classes, (2 * beam_width,))
+
+        prev_masked = masked
+        masked = classes == _pad
+
+        masked_repeat = ~prev_masked & (path_tails == classes)
+        classes = onp.where(masked_repeat, _pad, classes)
+
+        scatter_idx = onp.stack([paths_arange, path_tail_index], axis=1)
+        paths = OpenVINOKerasTensor(
+            ov_opset.scatter_nd_update(
+                get_ov_output(paths),
+                get_ov_output(scatter_idx),
+                get_ov_output(classes),
+            ).output(0)
+        )
+
+        x = onp.tile(x, (2 * beam_width,))
+        scores = scores + x
+
+        return paths, scores, masked
+
+    def _merge_scores(unique_inverse, scores):
+        scores_max = onp.max(scores)
+        scores_exp = onp.exp(scores - scores_max)
+        inv_indices = onp.expand_dims(unique_inverse, axis=1)
+        merged = scatter_update(
+            onp.zeros_like(scores), inv_indices, scores_exp, "add"
+        )
+        return onp.log(merged) + scores_max
+
+    def _prune_paths(paths, scores, masked):
+        paths, unique_inverse = onp.unique(
+            paths,
+            return_inverse=True,
+            size=2 * num_classes * beam_width,
+            axis=0,
+            fill_value=_pad,
+        )
+        if unique_inverse.ndim >= 2:
+            unique_inverse = onp.squeeze(unique_inverse, axis=1)
+
+        neg_inf = OpenVINOKerasTensor(
+            get_ov_output(float("-inf"), scores.output.get_element_type())
+        )
+        emit_scores = onp.where(masked, neg_inf, scores)
+        mask_scores = onp.where(masked, scores, neg_inf)
+
+        emit_scores = _merge_scores(unique_inverse, emit_scores)
+        mask_scores = _merge_scores(unique_inverse, mask_scores)
+
+        total_scores = onp.logaddexp(emit_scores, mask_scores)
+        top_indices = onp.argsort(total_scores)[-beam_width:]
+
+        paths = onp.take(paths, top_indices, axis=0)
+        emit_scores = onp.take(emit_scores, top_indices, axis=0)
+        mask_scores = onp.take(mask_scores, top_indices, axis=0)
+
+        paths = onp.tile(paths, (2, 1))
+        scores = onp.concatenate([emit_scores, mask_scores])
+        masked = onp.concatenate(
+            [
+                onp.zeros(beam_width, dtype="bool"),
+                onp.ones(beam_width, dtype="bool"),
+            ]
+        )
+
+        return paths, scores, masked
+
+    def _decode_step(paths, scores, masked, x):
+        paths, scores, masked = _extend_paths(paths, scores, masked, x)
+        paths, scores, masked = _prune_paths(paths, scores, masked)
+        return paths, scores, masked
+
+    def _decode_batch(
+        init_paths, init_scores, init_masked, inputs, seqlen_mask
+    ):
+        paths, scores, masked = init_paths, init_scores, init_masked
+
+        for t in range(1, max_seq_len):
+            new_paths, new_scores, new_masked = _decode_step(
+                paths, scores, masked, inputs[t]
+            )
+            sm = seqlen_mask[t]
+            paths = onp.where(sm, paths, new_paths)
+            scores = onp.where(sm, scores, new_scores)
+            masked = onp.where(sm, masked, new_masked)
+
+        paths, unique_inverse = onp.unique(
+            paths,
+            return_inverse=True,
+            size=2 * num_classes * beam_width,
+            axis=0,
+            fill_value=_pad,
+        )
+        if unique_inverse.ndim >= 2:
+            unique_inverse = onp.squeeze(unique_inverse, axis=1)
+        scores = _merge_scores(unique_inverse, scores)
+
+        top_indices = onp.flip(onp.argsort(scores)[-top_paths:], axis=0)
+        paths = onp.take(paths, top_indices, axis=0)
+        scores = onp.take(scores, top_indices, axis=0)
+
+        return paths, scores
+
+    results = [
+        _decode_batch(
+            init_paths[b],
+            init_scores[b],
+            init_masked[b],
+            inputs_tensor[b],
+            seqlen_mask[b],
+        )
+        for b in range(batch_size)
+    ]
+    paths = onp.stack([r[0] for r in results])
+    scores = onp.stack([r[1] for r in results])
+
+    paths = onp.where(paths == _pad, _pad, num_classes - paths - 1)
+    paths = onp.transpose(paths, [1, 0, 2])
+    return OpenVINOKerasTensor(get_ov_output(paths)), OpenVINOKerasTensor(
+        get_ov_output(scores)
     )
 
 

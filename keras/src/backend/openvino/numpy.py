@@ -5252,7 +5252,7 @@ def select(condlist, choicelist, default=0):
     return OpenVINOKerasTensor(result)
 
 
-def slogdet(x):
+def _logdet_components(x):
     x = convert_to_tensor(x)
     x_ov = get_ov_output(x)
     x_ov_type = x_ov.get_element_type()
@@ -5443,6 +5443,11 @@ def slogdet(x):
     sign_result = ov_opset.reshape(sign_det, out_shape, False).output(0)
     logabsdet_result = ov_opset.reshape(log_abs_det, out_shape, False).output(0)
 
+    return sign_result, logabsdet_result
+
+
+def slogdet(x):
+    sign_result, logabsdet_result = _logdet_components(x)
     return OpenVINOKerasTensor(sign_result), OpenVINOKerasTensor(
         logabsdet_result
     )

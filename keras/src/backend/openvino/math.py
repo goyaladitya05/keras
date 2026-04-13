@@ -169,6 +169,13 @@ def logsumexp(x, axis=None, keepdims=False):
     return OpenVINOKerasTensor(log_sum_exp)
 
 
+def logdet(x):
+    from keras.src.backend.openvino.numpy import _logdet_components
+
+    _, logabsdet = _logdet_components(x)
+    return OpenVINOKerasTensor(logabsdet)
+
+
 def qr(x, mode="reduced"):
     raise NotImplementedError("`qr` is not supported with openvino backend")
 

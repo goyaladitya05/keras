@@ -170,10 +170,9 @@ def logsumexp(x, axis=None, keepdims=False):
 
 
 def logdet(x):
-    from keras.src.backend.openvino.numpy import _logdet_components
+    from keras.src.backend.openvino.numpy import slogdet
 
-    _, logabsdet = _logdet_components(x)
-    return OpenVINOKerasTensor(logabsdet)
+    return slogdet(x)[1]
 
 
 def qr(x, mode="reduced"):

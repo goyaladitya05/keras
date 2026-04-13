@@ -170,6 +170,8 @@ def logsumexp(x, axis=None, keepdims=False):
 
 
 def logdet(x):
+    # OpenVINO does not have a direct logdet op
+    # Can be modified when there is a native op in ov_opset
     from keras.src.backend.openvino.numpy import slogdet
 
     return slogdet(x)[1]

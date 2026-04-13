@@ -49,9 +49,7 @@ MathOpsCorrectnessTest::test_logdet
 MeanTest::test_weighted_dynamic_shapes
 MergingLayersTest::test_average_with_mask
 MetricWrapperTest::test_weighted_dynamic_shape
-NNOpsCorrectnessTest::test_ctc_decode
 NNOpsCorrectnessTest::test_polar_corectness
-NNOpsDtypeTest::test_ctc_decode
 NNOpsDtypeTest::test_polar_
 NumpyDtypeTest::test_nanmedian
 NumpyOneInputOpsCorrectnessTest::test_conj

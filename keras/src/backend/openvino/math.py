@@ -5,8 +5,10 @@ from openvino import Type
 
 from keras.src.backend.openvino.core import OpenVINOKerasTensor
 from keras.src.backend.openvino.core import cast
+from keras.src.backend.openvino.core import convert_to_tensor
 from keras.src.backend.openvino.core import get_ov_output
 from keras.src.backend.openvino.core import standardize_dtype
+from keras.src.backend.openvino.numpy import select
 from keras.src.backend.openvino.numpy import stack
 
 INT32_MAX = 2**31 - 1
@@ -174,7 +176,12 @@ def logdet(x):
     # Can be modified when there is a native op in ov_opset
     from keras.src.backend.openvino.numpy import slogdet
 
-    return slogdet(x)[1]
+    sign, logabsdet = slogdet(x)
+    neg_det = sign < 0
+    # When determinant is negative return NaN instead of the log-abs value.
+    nan_value = convert_to_tensor(np.nan, dtype=logabsdet.dtype)
+
+    return select([neg_det], [nan_value], default=logabsdet)
 
 
 def qr(x, mode="reduced"):

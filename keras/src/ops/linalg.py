@@ -3,6 +3,7 @@ from keras.src import tree
 from keras.src.api_export import keras_export
 from keras.src.backend import KerasTensor
 from keras.src.backend import any_symbolic_tensors
+from keras.src.backend.common import dtypes
 from keras.src.ops.operation import Operation
 from keras.src.ops.operation_utils import reduce_shape
 
@@ -134,20 +135,38 @@ class Slogdet(Operation):
     def compute_output_spec(self, x):
         _assert_2d(x)
         _assert_square(x)
-        sign = KerasTensor(x.shape[:-2], dtype=x.dtype)
-        logabsdet = KerasTensor(x.shape[:-2], dtype=x.dtype)
+        out_dtype = dtypes.result_type(x.dtype, float)
+        # For complex inputs logabsdet is real; map complex64->float32,
+        # complex128->float64, otherwise the dtype stays the same.
+        _complex_to_real = {"complex64": "float32", "complex128": "float64"}
+        logabsdet_dtype = _complex_to_real.get(out_dtype, out_dtype)
+        sign = KerasTensor(x.shape[:-2], dtype=out_dtype)
+        logabsdet = KerasTensor(x.shape[:-2], dtype=logabsdet_dtype)
         return sign, logabsdet
 
 
 @keras_export(["keras.ops.slogdet", "keras.ops.linalg.slogdet"])
 def slogdet(x):
-    """Computes sign and logabsdet for the determinant of a square matrix.
+    """Compute the sign and natural logarithm of the determinant of a matrix.
 
     Args:
-        x: Input tensor of shape `(..., M, M)`.
+        x: Input matrix. It must 2D and square.
 
     Returns:
-        A tuple `(sign, logabsdet)` where each tensor has shape `(...,)`.
+        A tuple `(sign, logabsdet)`. `sign` is a number representing
+        the sign of the determinant. For a real matrix, this is 1, 0, or -1.
+        For a complex matrix, this is a complex number with absolute value 1
+        (i.e., it is on the unit circle), or else 0.
+        `logabsdet` is the natural log of the absolute value of the determinant.
+
+    Example:
+
+    >>> x = keras.ops.array([[1., 2.], [3., 4.]])
+    >>> sign, logabsdet = keras.ops.linalg.slogdet(x)
+    >>> sign
+    -1.0
+    >>> logabsdet
+    0.6931472
     """
     if any_symbolic_tensors((x,)):
         return Slogdet().symbolic_call(x)

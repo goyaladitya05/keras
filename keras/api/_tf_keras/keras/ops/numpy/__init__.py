@@ -181,7 +181,6 @@ from keras.src.ops.numpy import sin as sin
 from keras.src.ops.numpy import sinc as sinc
 from keras.src.ops.numpy import sinh as sinh
 from keras.src.ops.numpy import size as size
-from keras.src.ops.numpy import slogdet as slogdet
 from keras.src.ops.numpy import sort as sort
 from keras.src.ops.numpy import split as split
 from keras.src.ops.numpy import sqrt as sqrt

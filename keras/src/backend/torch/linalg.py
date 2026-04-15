@@ -19,6 +19,10 @@ def det(x):
     return torch.det(x)
 
 
+def slogdet(x):
+    return tuple(torch.linalg.slogdet(x))
+
+
 def eig(x):
     return torch.linalg.eig(x)
 

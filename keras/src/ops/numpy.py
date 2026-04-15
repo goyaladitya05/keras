@@ -9206,35 +9206,6 @@ def select(condlist, choicelist, default=0):
     return backend.numpy.select(condlist, choicelist, default)
 
 
-class Slogdet(Operation):
-    def call(self, x):
-        return backend.numpy.slogdet(x)
-
-    def compute_output_spec(self, x):
-        sign = KerasTensor((), dtype=x.dtype)
-        logabsdet = KerasTensor(x.shape[:-2], dtype=x.dtype)
-        return (sign, logabsdet)
-
-
-@keras_export(["keras.ops.slogdet", "keras.ops.numpy.slogdet"])
-def slogdet(x):
-    """Compute the sign and natural logarithm of the determinant of a matrix.
-
-    Args:
-        x: Input matrix. It must 2D and square.
-
-    Returns:
-        A tuple `(sign, logabsdet)`. `sign` is a number representing
-        the sign of the determinant. For a real matrix, this is 1, 0, or -1.
-        For a complex matrix, this is a complex number with absolute value 1
-        (i.e., it is on the unit circle), or else 0.
-        `logabsdet` is the natural log of the absolute value of the determinant.
-    """
-    if any_symbolic_tensors((x,)):
-        return Slogdet().symbolic_call(x)
-    return backend.numpy.slogdet(x)
-
-
 class Argpartition(Operation):
     def __init__(self, kth, axis=-1, *, name=None):
         super().__init__(name=name)

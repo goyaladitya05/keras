@@ -271,7 +271,7 @@ def erfinv(x):
 
 
 def logdet(x):
-    from keras.src.backend.jax.numpy import slogdet
+    from keras.src.backend.jax.linalg import slogdet
 
     # In JAX (like in NumPy) slogdet is more stable than
     # `np.log(np.linalg.det(x))`. See

@@ -30,6 +30,10 @@ def det(a):
     return tf.linalg.det(a)
 
 
+def slogdet(a):
+    return tuple(tf.linalg.slogdet(a))
+
+
 def eig(a):
     return tf.linalg.eig(a)
 

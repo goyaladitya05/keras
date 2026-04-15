@@ -298,7 +298,7 @@ def erfinv(x):
 
 
 def logdet(x):
-    from keras.src.backend.numpy.numpy import slogdet
+    from keras.src.backend.numpy.linalg import slogdet
 
     # In NumPy slogdet is more stable than `np.log(np.linalg.det(x))`. See
     # https://numpy.org/doc/stable/reference/generated/numpy.linalg.slogdet.html

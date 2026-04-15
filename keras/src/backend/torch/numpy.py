@@ -2303,11 +2303,6 @@ def select(condlist, choicelist, default=0):
     return out
 
 
-def slogdet(x):
-    x = convert_to_tensor(x)
-    return tuple(torch.linalg.slogdet(x))
-
-
 def argpartition(x, kth, axis=-1):
     x = convert_to_tensor(x, "int32")
     x = torch.transpose(x, axis, -1)

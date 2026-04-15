@@ -42,6 +42,7 @@ from keras.src.ops.linalg import lstsq as lstsq
 from keras.src.ops.linalg import lu_factor as lu_factor
 from keras.src.ops.linalg import norm as norm
 from keras.src.ops.linalg import qr as qr
+from keras.src.ops.linalg import slogdet as slogdet
 from keras.src.ops.linalg import solve as solve
 from keras.src.ops.linalg import solve_triangular as solve_triangular
 from keras.src.ops.linalg import svd as svd
@@ -300,7 +301,6 @@ from keras.src.ops.numpy import sin as sin
 from keras.src.ops.numpy import sinc as sinc
 from keras.src.ops.numpy import sinh as sinh
 from keras.src.ops.numpy import size as size
-from keras.src.ops.numpy import slogdet as slogdet
 from keras.src.ops.numpy import sort as sort
 from keras.src.ops.numpy import split as split
 from keras.src.ops.numpy import sqrt as sqrt

@@ -127,6 +127,40 @@ def _det(x):
     return backend.linalg.det(x)
 
 
+class Slogdet(Operation):
+    def call(self, x):
+        return _slogdet(x)
+
+    def compute_output_spec(self, x):
+        _assert_2d(x)
+        _assert_square(x)
+        sign = KerasTensor(x.shape[:-2], dtype=x.dtype)
+        logabsdet = KerasTensor(x.shape[:-2], dtype=x.dtype)
+        return sign, logabsdet
+
+
+@keras_export(["keras.ops.slogdet", "keras.ops.linalg.slogdet"])
+def slogdet(x):
+    """Computes sign and logabsdet for the determinant of a square matrix.
+
+    Args:
+        x: Input tensor of shape `(..., M, M)`.
+
+    Returns:
+        A tuple `(sign, logabsdet)` where each tensor has shape `(...,)`.
+    """
+    if any_symbolic_tensors((x,)):
+        return Slogdet().symbolic_call(x)
+    return _slogdet(x)
+
+
+def _slogdet(x):
+    x = backend.convert_to_tensor(x)
+    _assert_2d(x)
+    _assert_square(x)
+    return backend.linalg.slogdet(x)
+
+
 class Eig(Operation):
     def call(self, x):
         return _eig(x)

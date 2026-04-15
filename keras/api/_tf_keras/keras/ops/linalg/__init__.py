@@ -15,6 +15,7 @@ from keras.src.ops.linalg import lstsq as lstsq
 from keras.src.ops.linalg import lu_factor as lu_factor
 from keras.src.ops.linalg import norm as norm
 from keras.src.ops.linalg import qr as qr
+from keras.src.ops.linalg import slogdet as slogdet
 from keras.src.ops.linalg import solve as solve
 from keras.src.ops.linalg import solve_triangular as solve_triangular
 from keras.src.ops.linalg import svd as svd

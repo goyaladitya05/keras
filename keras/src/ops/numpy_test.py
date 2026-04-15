@@ -6392,22 +6392,6 @@ class NumpyOneInputOpsCorrectnessTest(testing.TestCase):
         y = knp.select(condlist, choicelist, 42)
         self.assertEqual(y.shape, (6,))
 
-    def test_slogdet(self):
-        x = np.ones((4, 4)) * 2.0
-        out = knp.slogdet(x)
-        self.assertAllClose(out[0], 0)
-        self.assertAllClose(out[0], 0)
-
-        x = backend.KerasTensor((3, 3))
-        out = knp.slogdet(x)
-        self.assertEqual(out[0].shape, ())
-        self.assertEqual(out[1].shape, ())
-
-        x = backend.KerasTensor((2, 4, 3, 3))
-        out = knp.slogdet(x)
-        self.assertEqual(out[0].shape, ())
-        self.assertEqual(out[1].shape, (2, 4))
-
     def test_nanargmax(self):
         x = np.array([[1.0, np.nan, -np.inf], [np.nan, 2.0, -1.0]])
 

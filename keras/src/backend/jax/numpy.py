@@ -1626,11 +1626,6 @@ def select(condlist, choicelist, default=0):
     return jnp.select(condlist, choicelist, default=default)
 
 
-def slogdet(x):
-    x = convert_to_tensor(x)
-    return tuple(jnp.linalg.slogdet(x))
-
-
 def argpartition(x, kth, axis=-1):
     return jnp.argpartition(x, kth, axis)
 

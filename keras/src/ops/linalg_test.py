@@ -50,6 +50,17 @@ class LinalgOpsDynamicShapeTest(testing.TestCase):
         with self.assertRaises(ValueError):
             linalg.det(x)
 
+    def test_slogdet(self):
+        x = KerasTensor((3, 3))
+        sign, logabsdet = linalg.slogdet(x)
+        self.assertEqual(sign.shape, ())
+        self.assertEqual(logabsdet.shape, ())
+
+        x = KerasTensor((2, 4, 3, 3))
+        sign, logabsdet = linalg.slogdet(x)
+        self.assertEqual(sign.shape, (2, 4))
+        self.assertEqual(logabsdet.shape, (2, 4))
+
     def test_eig(self):
         x = KerasTensor([None, 20, 20])
         w, v = linalg.eig(x)
@@ -221,6 +232,12 @@ class LinalgOpsStaticShapeTest(testing.TestCase):
         x = KerasTensor([10, 20, 15])
         with self.assertRaises(ValueError):
             linalg.det(x)
+
+    def test_slogdet(self):
+        x = KerasTensor((4, 3, 3))
+        sign, logabsdet = linalg.slogdet(x)
+        self.assertEqual(sign.shape, (4,))
+        self.assertEqual(logabsdet.shape, (4,))
 
     def test_eig(self):
         x = KerasTensor([4, 3, 3])
@@ -403,6 +420,13 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         with self.assertRaises(ValueError):
             x = np.random.rand(4, 3, 4)
             linalg.det(x)
+
+    def test_slogdet(self):
+        x = np.random.rand(4, 3, 3).astype("float32")
+        sign, logabsdet = linalg.slogdet(x)
+        np_sign, np_logabsdet = np.linalg.slogdet(x)
+        self.assertAllClose(sign, np_sign, atol=1e-5)
+        self.assertAllClose(logabsdet, np_logabsdet, atol=1e-5)
 
     @pytest.mark.skipif(
         testing.jax_uses_tpu(), reason="Unsupported on JAX with TPU"

@@ -40,6 +40,10 @@ def det(a):
     return jnp.linalg.det(a)
 
 
+def slogdet(a):
+    return tuple(jnp.linalg.slogdet(a))
+
+
 def eig(x):
     return jnp.linalg.eig(x)
 

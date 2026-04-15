@@ -24,6 +24,10 @@ def det(a):
     return np.linalg.det(a)
 
 
+def slogdet(a):
+    return tuple(np.linalg.slogdet(a))
+
+
 def eig(a):
     return np.linalg.eig(a)
 

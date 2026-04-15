@@ -184,10 +184,6 @@ def logdet(x):
     return select([neg_det], [nan_value], default=logabsdet)
 
 
-def qr(x, mode="reduced"):
-    raise NotImplementedError("`qr` is not supported with openvino backend")
-
-
 def extract_sequences(x, sequence_length, sequence_stride):
     x = get_ov_output(x)
     x_shape = x.partial_shape

@@ -211,11 +211,9 @@ def zeros(shape, dtype=None):
     dtype = standardize_dtype(dtype) or config.floatx()
     ov_type = OPENVINO_DTYPES[dtype]
     const_zero = ov_opset.constant(0, dtype=ov_type).output(0)
-    if isinstance(shape, tuple):
-        shape = list(shape)
-    elif isinstance(shape, int):
+    if isinstance(shape, int):
         shape = [shape]
-    output_shape = ov_opset.constant(shape, dtype=Type.i32).output(0)
+    output_shape = get_ov_output(list(shape), ov_type=Type.i32)
     zeros = ov_opset.broadcast(const_zero, output_shape)
     return OpenVINOKerasTensor(zeros.output(0))
 
@@ -1180,7 +1178,7 @@ def broadcast_to(x, shape):
             f"`broadcast_to` is supported only for tuple and list `shape`. "
             f"Received: shape={shape} (type {type(shape)})"
         )
-    target_shape = ov_opset.constant(list(shape), Type.i32).output(0)
+    target_shape = get_ov_output(list(shape), ov_type=Type.i32)
     x = get_ov_output(x)
     return OpenVINOKerasTensor(ov_opset.broadcast(x, target_shape).output(0))
 

@@ -128,7 +128,33 @@ def get_ov_output(x, ov_type=None, context_dtype=None):
     elif isinstance(x, (list, tuple)):
         if isinstance(x, tuple):
             x = list(x)
-        if ov_type is None:
+        target_type = ov_type if ov_type is not None else Type.i32
+        if any(isinstance(e, (OpenVINOKerasTensor, ov.Output)) for e in x):
+            # Mixed or fully-symbolic shape: concat individual dim tensors
+            parts = []
+            for e in x:
+                if isinstance(e, OpenVINOKerasTensor):
+                    elem = e.output
+                elif isinstance(e, ov.Output):
+                    elem = e
+                else:
+                    elem = ov_opset.constant([e], target_type).output(0)
+                if elem.get_element_type() != target_type:
+                    elem = ov_opset.convert(elem, target_type).output(0)
+                # Ensure rank-1 shape for concat
+                scalar_shape = elem.get_partial_shape()
+                if (
+                    scalar_shape.rank.is_static
+                    and scalar_shape.rank.get_length() == 0
+                ):
+                    elem = ov_opset.reshape(
+                        elem,
+                        ov_opset.constant([1], Type.i32).output(0),
+                        False,
+                    ).output(0)
+                parts.append(elem)
+            x = ov_opset.concat(parts, 0).output(0)
+        elif ov_type is None:
             x = ov_opset.constant(x).output(0)
         else:
             x = ov_opset.constant(x, ov_type).output(0)

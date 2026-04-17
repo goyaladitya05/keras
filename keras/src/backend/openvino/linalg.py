@@ -1004,12 +1004,33 @@ def norm(x, ord=None, axis=None, keepdims=False):
                 row_sum, row_axis_const, keep_dims=keepdims
             ).output(0)
         elif ord in ("nuc", 2, -2):
-            # Nuclear norm, spectral norm, and minimum singular value
-            # These require SVD which is not supported in OpenVINO backend
-            raise NotImplementedError(
-                f"`norm` with ord={ord} for matrix norms requires SVD "
-                "which is not supported with openvino backend"
+            from keras.src.backend.openvino.numpy import moveaxis
+
+            x_moved = moveaxis(x, axis, (-2, -1))
+            singular_values = get_ov_output(
+                svd(x_moved, full_matrices=False, compute_uv=False)
             )
+            last_axis = ov_opset.constant(-1, Type.i32).output(0)
+
+            if ord == -2:
+                norm_result = ov_opset.reduce_min(
+                    singular_values, last_axis, keep_dims=False
+                ).output(0)
+            elif ord == 2:
+                norm_result = ov_opset.reduce_max(
+                    singular_values, last_axis, keep_dims=False
+                ).output(0)
+            else:
+                norm_result = ov_opset.reduce_sum(
+                    singular_values, last_axis, keep_dims=False
+                ).output(0)
+
+            if keepdims:
+                for ax in sorted((row_axis, col_axis)):
+                    norm_result = ov_opset.unsqueeze(
+                        norm_result,
+                        ov_opset.constant([ax], Type.i32).output(0),
+                    ).output(0)
         else:
             raise ValueError(
                 f"Invalid `ord` argument for matrix norm. Received: ord={ord}"
@@ -1363,7 +1384,150 @@ def solve_triangular(a, b, lower=False):
 
 
 def svd(x, full_matrices=True, compute_uv=True):
-    raise NotImplementedError("`svd` is not supported with openvino backend")
+    x = convert_to_tensor(x)
+    x_ov = get_ov_output(x)
+    orig_type = x_ov.get_element_type()
+
+    # Work in f32:
+    #   f64 — Loop/constant-folding paths are less stable in this backend
+    #   f16/bf16 — iterative QR updates lose too much precision
+    #   complex/other — SVD path here is real-valued only
+    if orig_type != Type.f32:
+        x_ov = ov_opset.convert(x_ov, Type.f32).output(0)
+    work_type = Type.f32
+
+    rank = x_ov.get_partial_shape().rank.get_length()
+    zero_s = ov_opset.constant(0, Type.i32).output(0)
+    one_s = ov_opset.constant(1, Type.i32).output(0)
+    zero_1d = ov_opset.constant([0], Type.i32).output(0)
+    one_1d = ov_opset.constant([1], Type.i32).output(0)
+    minus_one_1d = ov_opset.constant([-1], Type.i32).output(0)
+    minus_two_1d = ov_opset.constant([-2], Type.i32).output(0)
+
+    x_shape = ov_opset.shape_of(x_ov, output_type="i32").output(0)
+    m_1d = ov_opset.gather(x_shape, minus_two_1d, zero_s).output(0)
+    n_1d = ov_opset.gather(x_shape, minus_one_1d, zero_s).output(0)
+    m_s = ov_opset.squeeze(m_1d, zero_s).output(0)
+    n_s = ov_opset.squeeze(n_1d, zero_s).output(0)
+    k_s = ov_opset.minimum(m_s, n_s).output(0)
+    k_1d = ov_opset.unsqueeze(k_s, zero_s).output(0)
+
+    if rank == 2:
+        transpose_axes = ov_opset.constant([1, 0], Type.i32).output(0)
+        batch_shape = ov_opset.constant([], Type.i32).output(0)
+    else:
+        perm = list(range(rank))
+        perm[-1], perm[-2] = perm[-2], perm[-1]
+        transpose_axes = ov_opset.constant(perm, Type.i32).output(0)
+        batch_shape = ov_opset.slice(
+            x_shape, zero_1d, minus_two_1d, one_1d, zero_1d
+        ).output(0)
+
+    x_t = ov_opset.transpose(x_ov, transpose_axes).output(0)
+    b_curr = ov_opset.matmul(x_t, x_ov, False, False).output(0)
+
+    range_n = ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0)
+    eye_n = ov_opset.one_hot(
+        range_n,
+        n_s,
+        ov_opset.constant(1.0, work_type),
+        ov_opset.constant(0.0, work_type),
+        axis=-1,
+    ).output(0)
+    if rank == 2:
+        v_curr = eye_n
+    else:
+        v_shape = ov_opset.concat([batch_shape, n_1d, n_1d], 0).output(0)
+        v_curr = ov_opset.broadcast(eye_n, v_shape).output(0)
+
+    for _ in range(32):
+        q_iter, r_iter = qr(OpenVINOKerasTensor(b_curr), mode="reduced")
+        q_iter = get_ov_output(q_iter)
+        r_iter = get_ov_output(r_iter)
+        b_curr = ov_opset.matmul(r_iter, q_iter, False, False).output(0)
+        v_curr = ov_opset.matmul(v_curr, q_iter, False, False).output(0)
+
+    diag_mask = ov_opset.broadcast(
+        eye_n, ov_opset.shape_of(b_curr, Type.i32).output(0)
+    ).output(0)
+    eigvals = ov_opset.reduce_sum(
+        ov_opset.multiply(b_curr, diag_mask).output(0),
+        ov_opset.constant(-1, Type.i32).output(0),
+        keep_dims=False,
+    ).output(0)
+    eigvals = ov_opset.maximum(
+        eigvals, ov_opset.constant(0.0, work_type).output(0)
+    ).output(0)
+    s_all = ov_opset.sqrt(eigvals).output(0)
+
+    topk = ov_opset.topk(s_all, k_s, -1, "max", "value")
+    s = topk.output(0)
+    sort_indices = topk.output(1)
+
+    if not compute_uv:
+        if orig_type != work_type:
+            s = ov_opset.convert(s, orig_type).output(0)
+        return OpenVINOKerasTensor(s)
+
+    v_gather_shape = ov_opset.concat([batch_shape, n_1d, k_1d], 0).output(0)
+    sort_indices = ov_opset.unsqueeze(
+        sort_indices, ov_opset.constant([-2], Type.i32).output(0)
+    ).output(0)
+    sort_indices = ov_opset.broadcast(sort_indices, v_gather_shape).output(0)
+    v_reduced = ov_opset.gather_elements(v_curr, sort_indices, -1).output(0)
+
+    eps = ov_opset.constant(1e-7, work_type).output(0)
+    one = ov_opset.constant(1.0, work_type).output(0)
+    zero = ov_opset.constant(0.0, work_type).output(0)
+    nonzero_mask = ov_opset.greater(s, eps).output(0)
+    safe_s = ov_opset.select(nonzero_mask, s, one).output(0)
+    inv_s = ov_opset.divide(one, safe_s).output(0)
+    inv_s = ov_opset.select(nonzero_mask, inv_s, zero).output(0)
+    inv_s = ov_opset.unsqueeze(
+        inv_s, ov_opset.constant([-2], Type.i32).output(0)
+    ).output(0)
+
+    u_reduced = ov_opset.matmul(x_ov, v_reduced, False, False).output(0)
+    u_reduced = ov_opset.multiply(u_reduced, inv_s).output(0)
+    vh_reduced = ov_opset.transpose(v_reduced, transpose_axes).output(0)
+
+    if full_matrices:
+        zero_i32 = ov_opset.constant(0, Type.i32).output(0)
+        m_minus_k = ov_opset.maximum(
+            ov_opset.subtract(m_s, k_s).output(0), zero_i32
+        ).output(0)
+        n_minus_k = ov_opset.maximum(
+            ov_opset.subtract(n_s, k_s).output(0), zero_i32
+        ).output(0)
+
+        u_pad_shape = ov_opset.concat(
+            [
+                batch_shape,
+                m_1d,
+                ov_opset.unsqueeze(m_minus_k, zero_s).output(0),
+            ],
+            0,
+        ).output(0)
+        vh_pad_shape = ov_opset.concat(
+            [
+                batch_shape,
+                ov_opset.unsqueeze(n_minus_k, zero_s).output(0),
+                n_1d,
+            ],
+            0,
+        ).output(0)
+        u_pad = ov_opset.broadcast(zero, u_pad_shape).output(0)
+        vh_pad = ov_opset.broadcast(zero, vh_pad_shape).output(0)
+        u_out = ov_opset.concat([u_reduced, u_pad], -1).output(0)
+        vh_out = ov_opset.concat([vh_reduced, vh_pad], -2).output(0)
+    else:
+        u_out = u_reduced
+        vh_out = vh_reduced
+
+    if orig_type != work_type:
+        u_out = ov_opset.convert(u_out, orig_type).output(0)
+        s = ov_opset.convert(s, orig_type).output(0)
+        vh_out = ov_opset.convert(vh_out, orig_type).output(0)
 
 
 def lstsq(a, b, rcond=None):

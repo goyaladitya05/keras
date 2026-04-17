@@ -1397,6 +1397,22 @@ def svd(x, full_matrices=True, compute_uv=True):
     work_type = Type.f32
 
     rank = x_ov.get_partial_shape().rank.get_length()
+    partial_shape = x_ov.get_partial_shape()
+    static_m = (
+        partial_shape[-2].get_length()
+        if partial_shape[-2].is_static()
+        else None
+    )
+    static_n = (
+        partial_shape[-1].get_length()
+        if partial_shape[-1].is_static()
+        else None
+    )
+    static_m_le_n = (
+        (static_m <= static_n)
+        if (static_m is not None and static_n is not None)
+        else None
+    )
     zero_s = ov_opset.constant(0, Type.i32).output(0)
     one_s = ov_opset.constant(1, Type.i32).output(0)
     zero_1d = ov_opset.constant([0], Type.i32).output(0)
@@ -1424,31 +1440,60 @@ def svd(x, full_matrices=True, compute_uv=True):
         ).output(0)
 
     x_t = ov_opset.transpose(x_ov, transpose_axes).output(0)
-    b_curr = ov_opset.matmul(x_t, x_ov, False, False).output(0)
 
-    range_n = ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0)
+    # QR iterations on the smaller gram matrix: X@X^T when M<=N, else X^T@X
+    if static_m_le_n is not False:
+        b_curr = ov_opset.matmul(x_ov, x_t, False, False).output(0)
+        iterate_dim = m_s
+        eye_iter = ov_opset.one_hot(
+            ov_opset.range(zero_s, m_s, one_s, output_type=Type.i32).output(0),
+            m_s,
+            ov_opset.constant(1.0, work_type),
+            ov_opset.constant(0.0, work_type),
+            axis=-1,
+        ).output(0)
+    else:
+        b_curr = ov_opset.matmul(x_t, x_ov, False, False).output(0)
+        iterate_dim = n_s
+        eye_iter = ov_opset.one_hot(
+            ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0),
+            n_s,
+            ov_opset.constant(1.0, work_type),
+            ov_opset.constant(0.0, work_type),
+            axis=-1,
+        ).output(0)
+
+    eye_m = ov_opset.one_hot(
+        ov_opset.range(zero_s, m_s, one_s, output_type=Type.i32).output(0),
+        m_s,
+        ov_opset.constant(1.0, work_type),
+        ov_opset.constant(0.0, work_type),
+        axis=-1,
+    ).output(0)
     eye_n = ov_opset.one_hot(
-        range_n,
+        ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0),
         n_s,
         ov_opset.constant(1.0, work_type),
         ov_opset.constant(0.0, work_type),
         axis=-1,
     ).output(0)
+
     if rank == 2:
-        v_curr = eye_n
+        q_curr = eye_iter
     else:
-        v_shape = ov_opset.concat([batch_shape, n_1d, n_1d], 0).output(0)
-        v_curr = ov_opset.broadcast(eye_n, v_shape).output(0)
+        iter_1d = ov_opset.unsqueeze(iterate_dim, zero_s).output(0)
+        q_shape = ov_opset.concat([batch_shape, iter_1d, iter_1d], 0).output(0)
+        q_curr = ov_opset.broadcast(eye_iter, q_shape).output(0)
 
     for _ in range(32):
         q_iter, r_iter = qr(OpenVINOKerasTensor(b_curr), mode="reduced")
         q_iter = get_ov_output(q_iter)
         r_iter = get_ov_output(r_iter)
         b_curr = ov_opset.matmul(r_iter, q_iter, False, False).output(0)
-        v_curr = ov_opset.matmul(v_curr, q_iter, False, False).output(0)
+        q_curr = ov_opset.matmul(q_curr, q_iter, False, False).output(0)
 
     diag_mask = ov_opset.broadcast(
-        eye_n, ov_opset.shape_of(b_curr, Type.i32).output(0)
+        eye_iter, ov_opset.shape_of(b_curr, Type.i32).output(0)
     ).output(0)
     eigvals = ov_opset.reduce_sum(
         ov_opset.multiply(b_curr, diag_mask).output(0),
@@ -1469,13 +1514,6 @@ def svd(x, full_matrices=True, compute_uv=True):
             s = ov_opset.convert(s, orig_type).output(0)
         return OpenVINOKerasTensor(s)
 
-    v_gather_shape = ov_opset.concat([batch_shape, n_1d, k_1d], 0).output(0)
-    sort_indices = ov_opset.unsqueeze(
-        sort_indices, ov_opset.constant([-2], Type.i32).output(0)
-    ).output(0)
-    sort_indices = ov_opset.broadcast(sort_indices, v_gather_shape).output(0)
-    v_reduced = ov_opset.gather_elements(v_curr, sort_indices, -1).output(0)
-
     eps = ov_opset.constant(1e-7, work_type).output(0)
     one = ov_opset.constant(1.0, work_type).output(0)
     zero = ov_opset.constant(0.0, work_type).output(0)
@@ -1483,43 +1521,54 @@ def svd(x, full_matrices=True, compute_uv=True):
     safe_s = ov_opset.select(nonzero_mask, s, one).output(0)
     inv_s = ov_opset.divide(one, safe_s).output(0)
     inv_s = ov_opset.select(nonzero_mask, inv_s, zero).output(0)
-    inv_s = ov_opset.unsqueeze(
+    inv_s_col = ov_opset.unsqueeze(
         inv_s, ov_opset.constant([-2], Type.i32).output(0)
     ).output(0)
 
-    u_reduced = ov_opset.matmul(x_ov, v_reduced, False, False).output(0)
-    u_reduced = ov_opset.multiply(u_reduced, inv_s).output(0)
+    if static_m_le_n is not False:
+        gather_shape = ov_opset.concat([batch_shape, m_1d, k_1d], 0).output(0)
+        indices = ov_opset.broadcast(
+            ov_opset.unsqueeze(
+                sort_indices, ov_opset.constant([-2], Type.i32).output(0)
+            ).output(0),
+            gather_shape,
+        ).output(0)
+        u_reduced = ov_opset.gather_elements(q_curr, indices, -1).output(0)
+        v_reduced = ov_opset.matmul(x_t, u_reduced, False, False).output(0)
+        v_reduced = ov_opset.multiply(v_reduced, inv_s_col).output(0)
+    else:
+        gather_shape = ov_opset.concat([batch_shape, n_1d, k_1d], 0).output(0)
+        indices = ov_opset.broadcast(
+            ov_opset.unsqueeze(
+                sort_indices, ov_opset.constant([-2], Type.i32).output(0)
+            ).output(0),
+            gather_shape,
+        ).output(0)
+        v_reduced = ov_opset.gather_elements(q_curr, indices, -1).output(0)
+        u_reduced = ov_opset.matmul(x_ov, v_reduced, False, False).output(0)
+        u_reduced = ov_opset.multiply(u_reduced, inv_s_col).output(0)
+
     vh_reduced = ov_opset.transpose(v_reduced, transpose_axes).output(0)
 
     if full_matrices:
-        zero_i32 = ov_opset.constant(0, Type.i32).output(0)
-        m_minus_k = ov_opset.maximum(
-            ov_opset.subtract(m_s, k_s).output(0), zero_i32
-        ).output(0)
-        n_minus_k = ov_opset.maximum(
-            ov_opset.subtract(n_s, k_s).output(0), zero_i32
-        ).output(0)
+        # QR on [reduced | I] completes the orthonormal basis
+        if rank == 2:
+            eye_m_full = eye_m
+            eye_n_full = eye_n
+        else:
+            m_sq_shape = ov_opset.concat([batch_shape, m_1d, m_1d], 0).output(0)
+            n_sq_shape = ov_opset.concat([batch_shape, n_1d, n_1d], 0).output(0)
+            eye_m_full = ov_opset.broadcast(eye_m, m_sq_shape).output(0)
+            eye_n_full = ov_opset.broadcast(eye_n, n_sq_shape).output(0)
 
-        u_pad_shape = ov_opset.concat(
-            [
-                batch_shape,
-                m_1d,
-                ov_opset.unsqueeze(m_minus_k, zero_s).output(0),
-            ],
-            0,
-        ).output(0)
-        vh_pad_shape = ov_opset.concat(
-            [
-                batch_shape,
-                ov_opset.unsqueeze(n_minus_k, zero_s).output(0),
-                n_1d,
-            ],
-            0,
-        ).output(0)
-        u_pad = ov_opset.broadcast(zero, u_pad_shape).output(0)
-        vh_pad = ov_opset.broadcast(zero, vh_pad_shape).output(0)
-        u_out = ov_opset.concat([u_reduced, u_pad], -1).output(0)
-        vh_out = ov_opset.concat([vh_reduced, vh_pad], -2).output(0)
+        u_full_input = ov_opset.concat([u_reduced, eye_m_full], -1).output(0)
+        u_full, _ = qr(OpenVINOKerasTensor(u_full_input), mode="complete")
+        u_out = get_ov_output(u_full)
+
+        v_full_input = ov_opset.concat([v_reduced, eye_n_full], -1).output(0)
+        v_full, _ = qr(OpenVINOKerasTensor(v_full_input), mode="complete")
+        v_out = get_ov_output(v_full)
+        vh_out = ov_opset.transpose(v_out, transpose_axes).output(0)
     else:
         u_out = u_reduced
         vh_out = vh_reduced
@@ -1528,6 +1577,12 @@ def svd(x, full_matrices=True, compute_uv=True):
         u_out = ov_opset.convert(u_out, orig_type).output(0)
         s = ov_opset.convert(s, orig_type).output(0)
         vh_out = ov_opset.convert(vh_out, orig_type).output(0)
+
+    return (
+        OpenVINOKerasTensor(u_out),
+        OpenVINOKerasTensor(s),
+        OpenVINOKerasTensor(vh_out),
+    )
 
 
 def lstsq(a, b, rcond=None):

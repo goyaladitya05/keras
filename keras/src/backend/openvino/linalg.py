@@ -1399,14 +1399,10 @@ def svd(x, full_matrices=True, compute_uv=True):
     rank = x_ov.get_partial_shape().rank.get_length()
     partial_shape = x_ov.get_partial_shape()
     static_m = (
-        partial_shape[-2].get_length()
-        if partial_shape[-2].is_static()
-        else None
+        partial_shape[-2].get_length() if partial_shape[-2].is_static else None
     )
     static_n = (
-        partial_shape[-1].get_length()
-        if partial_shape[-1].is_static()
-        else None
+        partial_shape[-1].get_length() if partial_shape[-1].is_static else None
     )
     static_m_le_n = (
         (static_m <= static_n)

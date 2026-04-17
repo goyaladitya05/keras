@@ -133,12 +133,7 @@ def get_ov_output(x, ov_type=None, context_dtype=None):
             # Mixed or fully-symbolic shape: concat individual dim tensors
             parts = []
             for e in x:
-                if isinstance(e, OpenVINOKerasTensor):
-                    elem = e.output
-                elif isinstance(e, ov.Output):
-                    elem = e
-                else:
-                    elem = ov_opset.constant([e], target_type).output(0)
+                elem = get_ov_output(e, ov_type=target_type)
                 if elem.get_element_type() != target_type:
                     elem = ov_opset.convert(elem, target_type).output(0)
                 # Ensure rank-1 shape for concat

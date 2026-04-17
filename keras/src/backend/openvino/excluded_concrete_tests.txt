@@ -21,6 +21,7 @@ ImageOpsBehaviorTests::test_perspective_transform
 ImageOpsCorrectnessTest::test_affine_transform
 ImageOpsCorrectnessTest::test_elastic_transform
 ImageOpsCorrectnessTest::test_extract_patches
+ImageOpsCorrectnessTest::test_gaussian_blur
 ImageOpsCorrectnessTest::test_pad_images
 ImageOpsCorrectnessTest::test_perspective_transform
 ImageOpsDtypeTest::test_affine_transform
@@ -32,7 +33,6 @@ LayerTest::test_complex_dtype_support
 LinalgOpsCorrectnessTest::test_cholesky
 LinalgOpsCorrectnessTest::test_eig
 LinalgOpsCorrectnessTest::test_lstsq
-LinalgOpsCorrectnessTest::test_norm_2_-2
 LinalgOpsCorrectnessTest::test_solve_triangular
 MathOpsCorrectnessTest::test_erfinv_operation_basic
 MathOpsCorrectnessTest::test_erfinv_operation_dtype

@@ -506,7 +506,7 @@ def _ov_build_affine_coords(images_ov, transform_ov):
 
     images_ov: [B, H, W, C] f32
     transform_ov: [B, 8] f32 (TF-convention flat transform)
-    Returns coords: [3, B, H, W, C] f32 — (row, col, chan) per output pixel.
+    Returns coords: [4, B, H, W, C] f32 — (batch, row, col, chan) per pixel.
     """
     shape_node = ov_opset.shape_of(images_ov, output_type=Type.i32).output(0)
     axis0 = ov_opset.constant(0, Type.i32).output(0)
@@ -815,43 +815,39 @@ def _ov_compute_homography(start_points_ov, end_points_ov):
     axis0 = ov_opset.constant(0, Type.i32).output(0)
     axis1 = ov_opset.constant(1, Type.i32).output(0)
 
-    # Extract per-corner x,y; use squeeze to remove the gathered axis dimension
-    def end_xy(corner):
-        # end_points_ov: [B, 4, 2] -> gather along axis1 with scalar -> [B, 2]
-        pt = ov_opset.gather(
-            end_points_ov,
-            ov_opset.constant([corner], Type.i32).output(0),
-            axis1,
-            batch_dims=0,
-        ).output(0)  # [B, 1, 2]
-        pt = ov_opset.squeeze(pt, axes=[1]).output(0)  # [B, 2]
-        ex = ov_opset.gather(
-            pt, ov_opset.constant([0], Type.i32).output(0), axis1
-        ).output(0)  # [B, 1]
-        ex = ov_opset.squeeze(ex, axes=[1]).output(0)  # [B]
-        ey = ov_opset.gather(
-            pt, ov_opset.constant([1], Type.i32).output(0), axis1
-        ).output(0)  # [B, 1]
-        ey = ov_opset.squeeze(ey, axes=[1]).output(0)  # [B]
-        return ex, ey
+    def _split_points(pts_ov):
+        # pts_ov: [B, 4, 2] -> list of 4 pairs (x [B], y [B])
+        # Split along axis1 (corners) then axis2 (x/y) in one pass each.
+        corners = [
+            ov_opset.squeeze(
+                ov_opset.gather(
+                    pts_ov,
+                    ov_opset.constant([c], Type.i32).output(0),
+                    axis1,
+                ).output(0),  # [B, 1, 2]
+                axes=[1],
+            ).output(0)  # [B, 2]
+            for c in range(4)
+        ]
+        result = []
+        for pt in corners:
+            x = ov_opset.squeeze(
+                ov_opset.gather(
+                    pt, ov_opset.constant([0], Type.i32).output(0), axis1
+                ).output(0),
+                axes=[1],
+            ).output(0)  # [B]
+            y = ov_opset.squeeze(
+                ov_opset.gather(
+                    pt, ov_opset.constant([1], Type.i32).output(0), axis1
+                ).output(0),
+                axes=[1],
+            ).output(0)  # [B]
+            result.append((x, y))
+        return result
 
-    def start_xy(corner):
-        pt = ov_opset.gather(
-            start_points_ov,
-            ov_opset.constant([corner], Type.i32).output(0),
-            axis1,
-            batch_dims=0,
-        ).output(0)  # [B, 1, 2]
-        pt = ov_opset.squeeze(pt, axes=[1]).output(0)  # [B, 2]
-        sx = ov_opset.gather(
-            pt, ov_opset.constant([0], Type.i32).output(0), axis1
-        ).output(0)  # [B, 1]
-        sx = ov_opset.squeeze(sx, axes=[1]).output(0)  # [B]
-        sy = ov_opset.gather(
-            pt, ov_opset.constant([1], Type.i32).output(0), axis1
-        ).output(0)  # [B, 1]
-        sy = ov_opset.squeeze(sy, axes=[1]).output(0)  # [B]
-        return sx, sy
+    end_pts = _split_points(end_points_ov)
+    start_pts = _split_points(start_points_ov)
 
     B_shape = ov_opset.shape_of(start_points_ov, output_type=Type.i32).output(0)
     B = ov_opset.gather(
@@ -907,8 +903,8 @@ def _ov_compute_homography(start_points_ov, end_points_ov):
     rows = []
     rhs_cols = []
     for corner in range(4):
-        ex, ey = end_xy(corner)
-        sx, sy = start_xy(corner)
+        ex, ey = end_pts[corner]
+        sx, sy = start_pts[corner]
         r1, r2 = make_two_rows(ex, ey, sx, sy)
         rows.extend([r1, r2])
         rhs_cols.extend([sx, sy])
@@ -934,6 +930,7 @@ def perspective_transform(
     start_points,
     end_points,
     interpolation="bilinear",
+    fill_mode="constant",
     fill_value=0,
     data_format=None,
 ):
@@ -943,6 +940,11 @@ def perspective_transform(
             "Invalid value for argument `interpolation`. Expected of one "
             f"{set(AFFINE_TRANSFORM_INTERPOLATIONS.keys())}. Received: "
             f"interpolation={interpolation}"
+        )
+    if fill_mode not in AFFINE_TRANSFORM_FILL_MODES:
+        raise ValueError(
+            "Invalid value for argument `fill_mode`. Expected of one "
+            f"{AFFINE_TRANSFORM_FILL_MODES}. Received: fill_mode={fill_mode}"
         )
 
     images = convert_to_tensor(images)
@@ -1187,7 +1189,7 @@ def perspective_transform(
         OpenVINOKerasTensor(images_ov),
         OpenVINOKerasTensor(coords),
         order=AFFINE_TRANSFORM_INTERPOLATIONS[interpolation],
-        fill_mode="constant",
+        fill_mode=fill_mode,
         fill_value=fill_value,
     )
     result = get_ov_output(result)
@@ -1615,7 +1617,9 @@ def elastic_transform(
     alpha_val = float(alpha)
     kernel_size_1d = int(6 * sigma_val) | 1
 
-    # Draw seed and generate random displacement fields using OV random ops
+    # OV random ops require static seed attributes, so symbolic seeds must be
+    # materialized via convert_to_numpy. This is an unavoidable sync point given
+    # the OV backend's stateless random design.
     seed_val = draw_seed(seed)
     if isinstance(seed_val, OpenVINOKerasTensor):
         s = convert_to_numpy(seed_val)

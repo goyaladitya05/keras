@@ -1404,11 +1404,6 @@ def svd(x, full_matrices=True, compute_uv=True):
     static_n = (
         partial_shape[-1].get_length() if partial_shape[-1].is_static else None
     )
-    static_m_le_n = (
-        (static_m <= static_n)
-        if (static_m is not None and static_n is not None)
-        else None
-    )
     zero_s = ov_opset.constant(0, Type.i32).output(0)
     one_s = ov_opset.constant(1, Type.i32).output(0)
     zero_1d = ov_opset.constant([0], Type.i32).output(0)
@@ -1437,33 +1432,23 @@ def svd(x, full_matrices=True, compute_uv=True):
 
     x_t = ov_opset.transpose(x_ov, transpose_axes).output(0)
 
-    # QR iterations on the smaller gram matrix: X@X^T when M<=N, else X^T@X
-    if static_m_le_n is not False:
-        b_curr = ov_opset.matmul(x_ov, x_t, False, False).output(0)
-        iterate_dim = m_s
-        eye_iter = ov_opset.one_hot(
-            ov_opset.range(zero_s, m_s, one_s, output_type=Type.i32).output(0),
-            m_s,
-            ov_opset.constant(1.0, work_type),
-            ov_opset.constant(0.0, work_type),
-            axis=-1,
-        ).output(0)
-    else:
-        b_curr = ov_opset.matmul(x_t, x_ov, False, False).output(0)
-        iterate_dim = n_s
-        eye_iter = ov_opset.one_hot(
-            ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0),
-            n_s,
-            ov_opset.constant(1.0, work_type),
-            ov_opset.constant(0.0, work_type),
-            axis=-1,
-        ).output(0)
+    # Always iterate on X^T@X (N×N gram matrix).
+    # q_curr accumulates the full N×N orthogonal V.  This lets us:
+    #   - safely transpose q_curr (matmul accumulation, not QR output)
+    #   - directly use QR Q (no transpose) to extend U for full_matrices=True
+    b_curr = ov_opset.matmul(x_t, x_ov, False, False).output(0)
+    eye_iter = ov_opset.one_hot(
+        ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0),
+        n_s,
+        ov_opset.constant(1.0, work_type),
+        ov_opset.constant(0.0, work_type),
+        axis=-1,
+    ).output(0)
 
     if rank == 2:
         q_curr = eye_iter
     else:
-        iter_1d = ov_opset.unsqueeze(iterate_dim, zero_s).output(0)
-        q_shape = ov_opset.concat([batch_shape, iter_1d, iter_1d], 0).output(0)
+        q_shape = ov_opset.concat([batch_shape, n_1d, n_1d], 0).output(0)
         q_curr = ov_opset.broadcast(eye_iter, q_shape).output(0)
 
     for _ in range(32):
@@ -1506,95 +1491,117 @@ def svd(x, full_matrices=True, compute_uv=True):
         inv_s, ov_opset.constant([-2], Type.i32).output(0)
     ).output(0)
 
-    if static_m_le_n is not False:
-        gather_shape = ov_opset.concat([batch_shape, m_1d, k_1d], 0).output(0)
-        indices = ov_opset.broadcast(
-            ov_opset.unsqueeze(
-                sort_indices, ov_opset.constant([-2], Type.i32).output(0)
-            ).output(0),
-            gather_shape,
-        ).output(0)
-        u_reduced = ov_opset.gather_elements(q_curr, indices, -1).output(0)
-        v_reduced = ov_opset.matmul(x_t, u_reduced, False, False).output(0)
-        v_reduced = ov_opset.multiply(v_reduced, inv_s_col).output(0)
-    else:
-        gather_shape = ov_opset.concat([batch_shape, n_1d, k_1d], 0).output(0)
-        indices = ov_opset.broadcast(
-            ov_opset.unsqueeze(
-                sort_indices, ov_opset.constant([-2], Type.i32).output(0)
-            ).output(0),
-            gather_shape,
-        ).output(0)
-        v_reduced = ov_opset.gather_elements(q_curr, indices, -1).output(0)
-        u_reduced = ov_opset.matmul(x_ov, v_reduced, False, False).output(0)
-        u_reduced = ov_opset.multiply(u_reduced, inv_s_col).output(0)
+    # q_curr is N×N; gather top-k columns → v_reduced [*batch, N, k]
+    gather_shape = ov_opset.concat([batch_shape, n_1d, k_1d], 0).output(0)
+    indices = ov_opset.broadcast(
+        ov_opset.unsqueeze(
+            sort_indices, ov_opset.constant([-2], Type.i32).output(0)
+        ).output(0),
+        gather_shape,
+    ).output(0)
+    v_reduced = ov_opset.gather_elements(q_curr, indices, -1).output(0)
+    u_reduced = ov_opset.matmul(x_ov, v_reduced, False, False).output(0)
+    u_reduced = ov_opset.multiply(u_reduced, inv_s_col).output(0)
 
     vh_reduced = ov_opset.transpose(v_reduced, transpose_axes).output(0)
 
     if full_matrices:
-        # q_curr is square orthogonal (M×M when M<=N, else N×N).
-        # Reorder its columns — top-k singular-vector columns first — instead
-        # of calling qr() again, which triggers an OpenVINO CPU shape bug on
-        # deep constant graphs.
-        def _reorder_cols(q, dim_s, dim_1d, full_col_count):
-            # q: [..., dim, dim] orthogonal.
-            # sort_indices: [..., k] — indices of the top-k columns.
-            # Append remaining column indices [k, k+1, ..., dim-1] and
-            # gather to produce [..., dim, full_col_count] reordered matrix.
-            # When k == dim (square, non-rectangular case) sort_indices
-            # already covers every column, so just use it directly.
-            if rank > 2:
-                sq_shape = ov_opset.concat(
-                    [batch_shape, dim_1d, dim_1d], 0
-                ).output(0)
-                q = ov_opset.broadcast(q, sq_shape).output(0)
-            static_k = (
-                min(static_m, static_n)
-                if static_m is not None and static_n is not None
-                else None
-            )
-            if static_k is not None and static_k == full_col_count:
-                col_order = sort_indices
-            else:
-                rest = ov_opset.range(
-                    k_s, dim_s, one_s, output_type=Type.i32
-                ).output(0)
-                # rest is 1-D [dim-k]; broadcast to match sort_indices batch
-                if rank > 2:
-                    rest = ov_opset.unsqueeze(
-                        rest,
-                        ov_opset.constant(
-                            list(range(rank - 2)), Type.i32
-                        ).output(0),
-                    ).output(0)
-                    rest_bc_shape = ov_opset.concat(
-                        [
-                            batch_shape,
-                            ov_opset.unsqueeze(
-                                ov_opset.subtract(dim_s, k_s).output(0),
-                                zero_s,
-                            ).output(0),
-                        ],
-                        0,
-                    ).output(0)
-                    rest = ov_opset.broadcast(rest, rest_bc_shape).output(0)
-                col_order = ov_opset.concat([sort_indices, rest], -1).output(0)
-            col_order_bc = ov_opset.broadcast(
-                ov_opset.unsqueeze(
-                    col_order,
-                    ov_opset.constant([-2], Type.i32).output(0),
-                ).output(0),
-                ov_opset.concat([batch_shape, dim_1d, dim_1d], 0).output(0),
+        # q_curr is always N×N orthogonal (V).
+        # Vh [*batch, N, N]: reorder q_curr columns then transpose.
+        # Transposing a matmul-accumulation is safe (no OpenVINO CPU bug).
+        rest_v = ov_opset.range(k_s, n_s, one_s, output_type=Type.i32).output(0)
+        if rank > 2:
+            rest_v = ov_opset.unsqueeze(
+                rest_v,
+                ov_opset.constant(list(range(rank - 2)), Type.i32).output(0),
             ).output(0)
-            return ov_opset.gather_elements(q, col_order_bc, -1).output(0)
+            rest_v_bc_shape = ov_opset.concat(
+                [
+                    batch_shape,
+                    ov_opset.unsqueeze(
+                        ov_opset.subtract(n_s, k_s).output(0), zero_s
+                    ).output(0),
+                ],
+                0,
+            ).output(0)
+            rest_v = ov_opset.broadcast(rest_v, rest_v_bc_shape).output(0)
+        v_col_order = ov_opset.concat([sort_indices, rest_v], -1).output(0)
+        v_col_order_bc = ov_opset.broadcast(
+            ov_opset.unsqueeze(
+                v_col_order, ov_opset.constant([-2], Type.i32).output(0)
+            ).output(0),
+            ov_opset.concat([batch_shape, n_1d, n_1d], 0).output(0),
+        ).output(0)
+        v_full = ov_opset.gather_elements(q_curr, v_col_order_bc, -1).output(0)
+        vh_out = ov_opset.transpose(v_full, transpose_axes).output(0)
 
-        if static_m_le_n is not False:
-            u_out = _reorder_cols(q_curr, m_s, m_1d, static_m)
-            vh_out = vh_reduced
-        else:
-            v_full = _reorder_cols(q_curr, n_s, n_1d, static_n)
+        m_le_n = (
+            static_m is not None
+            and static_n is not None
+            and static_m <= static_n
+        )
+        if m_le_n:
+            # M<=N: u_reduced is already M×k=M×M (k=M), no extension needed.
             u_out = u_reduced
-            vh_out = ov_opset.transpose(v_full, transpose_axes).output(0)
+        else:
+            # M>N: u_reduced is M×N; extend to M×M via Gram-Schmidt.
+            # Using QR here triggers an OpenVINO CPU shape bug when the
+            # input graph is deep (32+ chained Loop nodes from QR iteration).
+            # Gram-Schmidt uses only matmul ops so it is safe.
+            # static_m and static_n are both known here (m_le_n check above).
+            n_extra = static_m - static_n  # number of new columns needed
+            eps_gs = ov_opset.constant(1e-10, work_type).output(0)
+            u_cols = u_reduced  # [*batch, M, N] — grows to [*batch, M, M]
+            added = 0
+            for i in range(static_m):
+                if added >= n_extra:
+                    break
+                # candidate = e_i [*batch, M, 1]
+                ei_idx = ov_opset.constant([i], Type.i32).output(0)
+                ei = ov_opset.one_hot(
+                    ei_idx,
+                    ov_opset.constant(static_m, Type.i32).output(0),
+                    ov_opset.constant(1.0, work_type),
+                    ov_opset.constant(0.0, work_type),
+                    axis=-1,
+                ).output(0)  # [1, M]
+                if rank > 2:
+                    ei = ov_opset.broadcast(
+                        ei,
+                        ov_opset.concat(
+                            [
+                                batch_shape,
+                                ov_opset.constant([1], Type.i32).output(0),
+                                ov_opset.constant([static_m], Type.i32).output(
+                                    0
+                                ),
+                            ],
+                            0,
+                        ).output(0),
+                    ).output(0)  # [*batch, 1, M]
+                ei_col = ov_opset.transpose(
+                    ei,
+                    ov_opset.constant(
+                        list(range(rank - 2)) + [rank - 1, rank - 2], Type.i32
+                    ).output(0),
+                ).output(0)  # [*batch, M, 1]
+                # c = ei - u_cols @ (u_cols^T @ ei)  [Gram-Schmidt]
+                coeff = ov_opset.matmul(u_cols, ei_col, True, False).output(0)
+                proj = ov_opset.matmul(u_cols, coeff, False, False).output(0)
+                c = ov_opset.subtract(ei_col, proj).output(0)
+                norm_c = ov_opset.sqrt(
+                    ov_opset.reduce_sum(
+                        ov_opset.multiply(c, c).output(0),
+                        ov_opset.constant([-2], Type.i32).output(0),
+                        keep_dims=True,
+                    ).output(0)
+                ).output(0)
+                c_norm = ov_opset.divide(
+                    c, ov_opset.maximum(norm_c, eps_gs).output(0)
+                ).output(0)
+                u_cols = ov_opset.concat([u_cols, c_norm], -1).output(0)
+                added += 1
+            u_out = u_cols
     else:
         u_out = u_reduced
         vh_out = vh_reduced

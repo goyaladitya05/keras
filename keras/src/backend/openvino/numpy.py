@@ -199,9 +199,11 @@ def ones(shape, dtype=None):
     dtype = standardize_dtype(dtype) or config.floatx()
     ov_type = OPENVINO_DTYPES[dtype]
     const_one = ov_opset.constant(1, ov_type).output(0)
-    if isinstance(shape, int):
+    if isinstance(shape, tuple):
+        shape = list(shape)
+    elif isinstance(shape, int):
         shape = [shape]
-    output_shape = shape_to_ov_output(list(shape))
+    output_shape = ov_opset.constant(shape, dtype=Type.i32).output(0)
     ones = ov_opset.broadcast(const_one, output_shape)
     return OpenVINOKerasTensor(ones.output(0))
 
@@ -210,9 +212,11 @@ def zeros(shape, dtype=None):
     dtype = standardize_dtype(dtype) or config.floatx()
     ov_type = OPENVINO_DTYPES[dtype]
     const_zero = ov_opset.constant(0, dtype=ov_type).output(0)
-    if isinstance(shape, int):
+    if isinstance(shape, tuple):
+        shape = list(shape)
+    elif isinstance(shape, int):
         shape = [shape]
-    output_shape = shape_to_ov_output(list(shape))
+    output_shape = ov_opset.constant(shape, dtype=Type.i32).output(0)
     zeros = ov_opset.broadcast(const_zero, output_shape)
     return OpenVINOKerasTensor(zeros.output(0))
 

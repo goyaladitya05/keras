@@ -1459,21 +1459,6 @@ def svd(x, full_matrices=True, compute_uv=True):
             axis=-1,
         ).output(0)
 
-    eye_m = ov_opset.one_hot(
-        ov_opset.range(zero_s, m_s, one_s, output_type=Type.i32).output(0),
-        m_s,
-        ov_opset.constant(1.0, work_type),
-        ov_opset.constant(0.0, work_type),
-        axis=-1,
-    ).output(0)
-    eye_n = ov_opset.one_hot(
-        ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0),
-        n_s,
-        ov_opset.constant(1.0, work_type),
-        ov_opset.constant(0.0, work_type),
-        axis=-1,
-    ).output(0)
-
     if rank == 2:
         q_curr = eye_iter
     else:
@@ -1547,24 +1532,69 @@ def svd(x, full_matrices=True, compute_uv=True):
     vh_reduced = ov_opset.transpose(v_reduced, transpose_axes).output(0)
 
     if full_matrices:
-        # QR on [reduced | I] completes the orthonormal basis
-        if rank == 2:
-            eye_m_full = eye_m
-            eye_n_full = eye_n
+        # q_curr is square orthogonal (M×M when M<=N, else N×N).
+        # Reorder its columns — top-k singular-vector columns first — instead
+        # of calling qr() again, which triggers an OpenVINO CPU shape bug on
+        # deep constant graphs.
+        def _reorder_cols(q, dim_s, dim_1d, full_col_count):
+            # q: [..., dim, dim] orthogonal.
+            # sort_indices: [..., k] — indices of the top-k columns.
+            # Append remaining column indices [k, k+1, ..., dim-1] and
+            # gather to produce [..., dim, full_col_count] reordered matrix.
+            # When k == dim (square, non-rectangular case) sort_indices
+            # already covers every column, so just use it directly.
+            if rank > 2:
+                sq_shape = ov_opset.concat(
+                    [batch_shape, dim_1d, dim_1d], 0
+                ).output(0)
+                q = ov_opset.broadcast(q, sq_shape).output(0)
+            static_k = (
+                min(static_m, static_n)
+                if static_m is not None and static_n is not None
+                else None
+            )
+            if static_k is not None and static_k == full_col_count:
+                col_order = sort_indices
+            else:
+                rest = ov_opset.range(
+                    k_s, dim_s, one_s, output_type=Type.i32
+                ).output(0)
+                # rest is 1-D [dim-k]; broadcast to match sort_indices batch
+                if rank > 2:
+                    rest = ov_opset.unsqueeze(
+                        rest,
+                        ov_opset.constant(
+                            list(range(rank - 2)), Type.i32
+                        ).output(0),
+                    ).output(0)
+                    rest_bc_shape = ov_opset.concat(
+                        [
+                            batch_shape,
+                            ov_opset.unsqueeze(
+                                ov_opset.subtract(dim_s, k_s).output(0),
+                                zero_s,
+                            ).output(0),
+                        ],
+                        0,
+                    ).output(0)
+                    rest = ov_opset.broadcast(rest, rest_bc_shape).output(0)
+                col_order = ov_opset.concat([sort_indices, rest], -1).output(0)
+            col_order_bc = ov_opset.broadcast(
+                ov_opset.unsqueeze(
+                    col_order,
+                    ov_opset.constant([-2], Type.i32).output(0),
+                ).output(0),
+                ov_opset.concat([batch_shape, dim_1d, dim_1d], 0).output(0),
+            ).output(0)
+            return ov_opset.gather_elements(q, col_order_bc, -1).output(0)
+
+        if static_m_le_n is not False:
+            u_out = _reorder_cols(q_curr, m_s, m_1d, static_m)
+            vh_out = vh_reduced
         else:
-            m_sq_shape = ov_opset.concat([batch_shape, m_1d, m_1d], 0).output(0)
-            n_sq_shape = ov_opset.concat([batch_shape, n_1d, n_1d], 0).output(0)
-            eye_m_full = ov_opset.broadcast(eye_m, m_sq_shape).output(0)
-            eye_n_full = ov_opset.broadcast(eye_n, n_sq_shape).output(0)
-
-        u_full_input = ov_opset.concat([u_reduced, eye_m_full], -1).output(0)
-        u_full, _ = qr(OpenVINOKerasTensor(u_full_input), mode="complete")
-        u_out = get_ov_output(u_full)
-
-        v_full_input = ov_opset.concat([v_reduced, eye_n_full], -1).output(0)
-        v_full, _ = qr(OpenVINOKerasTensor(v_full_input), mode="complete")
-        v_out = get_ov_output(v_full)
-        vh_out = ov_opset.transpose(v_out, transpose_axes).output(0)
+            v_full = _reorder_cols(q_curr, n_s, n_1d, static_n)
+            u_out = u_reduced
+            vh_out = ov_opset.transpose(v_full, transpose_axes).output(0)
     else:
         u_out = u_reduced
         vh_out = vh_reduced

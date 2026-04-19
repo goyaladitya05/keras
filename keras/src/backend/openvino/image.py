@@ -930,7 +930,6 @@ def perspective_transform(
     start_points,
     end_points,
     interpolation="bilinear",
-    fill_mode="constant",
     fill_value=0,
     data_format=None,
 ):
@@ -940,11 +939,6 @@ def perspective_transform(
             "Invalid value for argument `interpolation`. Expected of one "
             f"{set(AFFINE_TRANSFORM_INTERPOLATIONS.keys())}. Received: "
             f"interpolation={interpolation}"
-        )
-    if fill_mode not in AFFINE_TRANSFORM_FILL_MODES:
-        raise ValueError(
-            "Invalid value for argument `fill_mode`. Expected of one "
-            f"{AFFINE_TRANSFORM_FILL_MODES}. Received: fill_mode={fill_mode}"
         )
 
     images = convert_to_tensor(images)
@@ -1189,7 +1183,7 @@ def perspective_transform(
         OpenVINOKerasTensor(images_ov),
         OpenVINOKerasTensor(coords),
         order=AFFINE_TRANSFORM_INTERPOLATIONS[interpolation],
-        fill_mode=fill_mode,
+        fill_mode="constant",
         fill_value=fill_value,
     )
     result = get_ov_output(result)

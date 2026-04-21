@@ -8,37 +8,10 @@ from keras.src.backend.openvino.core import OPENVINO_DTYPES
 from keras.src.backend.openvino.core import OpenVINOKerasTensor
 from keras.src.backend.openvino.core import convert_to_numpy
 from keras.src.backend.openvino.core import get_ov_output
+from keras.src.backend.openvino.core import shape_to_ov_output
 from keras.src.random.seed_generator import SeedGenerator
 from keras.src.random.seed_generator import draw_seed
 from keras.src.random.seed_generator import make_default_seed
-
-
-def _np_to_ov_const(arr):
-    """Create an OV Constant from a numpy array, handling bfloat16 specially.
-
-    OpenVINO's Python binding resolves numpy dtypes via an internal C++ map that
-    only covers standard numpy scalar types.  ``ml_dtypes.bfloat16`` is not a
-    standard numpy dtype, so passing a bfloat16 array directly to
-    ``ov_opset.constant()`` raises ``RuntimeError: Unsupported data type:
-    bfloat16``.  Supplying ``Type.bf16`` explicitly routes the call through the
-    packed-type constructor path that OpenVINO does support.
-    """
-    if arr.dtype == "bfloat16":
-        return ov_opset.constant(arr, OPENVINO_DTYPES["bfloat16"]).output(0)
-    return ov_opset.constant(arr).output(0)
-
-
-def _rng_from_seed_data(seed_data):
-    """Create a NumPy RNG from seed tensor data.
-
-    Seed tensors are stored as int32 and may be negative due to C-style
-    wrapping of large user-supplied values.  Reinterpret the bit pattern
-    as uint32 so that np.random.default_rng receives non-negative entropy.
-    """
-    if seed_data is None:
-        return np.random.default_rng()
-    arr = np.asarray(seed_data, dtype=np.int32).view(np.uint32)
-    return np.random.default_rng(arr)
 
 
 def _random_uniform(shape, minval, maxval, dtype, seed1, seed2):
@@ -69,26 +42,47 @@ def _random_uniform(shape, minval, maxval, dtype, seed1, seed2):
 
 def normal(shape, mean=0.0, stddev=1.0, dtype=None, seed=None):
     dtype = dtype or floatx()
+    ov_dtype = OPENVINO_DTYPES[dtype]
     seed_val = draw_seed(seed)
     if isinstance(seed_val, OpenVINOKerasTensor):
-        seed_data = convert_to_numpy(seed_val)
+        seed1, seed2 = convert_to_numpy(seed_val)
     else:
-        seed_data = seed_val.data
-    rng = _rng_from_seed_data(seed_data)
-    normal_const = rng.normal(size=shape, loc=mean, scale=stddev).astype(dtype)
-    return OpenVINOKerasTensor(_np_to_ov_const(normal_const))
+        seed1, seed2 = seed_val.data
+    shape_ov = shape_to_ov_output(
+        list(shape) if not isinstance(shape, int) else [shape]
+    )
+    z0 = _random_normal(shape_ov, ov_dtype, int(seed1), int(seed2))
+    mean_c = _const(float(mean), ov_dtype)
+    stddev_c = _const(float(stddev), ov_dtype)
+    result = ov_opset.add(ov_opset.multiply(z0, stddev_c), mean_c).output(0)
+    return OpenVINOKerasTensor(result)
 
 
 def uniform(shape, minval=0.0, maxval=1.0, dtype=None, seed=None):
     dtype = dtype or floatx()
+    ov_dtype = OPENVINO_DTYPES[dtype]
     seed_val = draw_seed(seed)
     if isinstance(seed_val, OpenVINOKerasTensor):
-        seed_data = convert_to_numpy(seed_val)
+        seed1, seed2 = convert_to_numpy(seed_val)
     else:
-        seed_data = seed_val.data
-    rng = _rng_from_seed_data(seed_data)
-    random_values = rng.uniform(minval, maxval, size=shape).astype(dtype)
-    return OpenVINOKerasTensor(_np_to_ov_const(random_values))
+        seed1, seed2 = seed_val.data
+    shape_ov = shape_to_ov_output(
+        list(shape) if not isinstance(shape, int) else [shape]
+    )
+    minval_f, maxval_f = float(minval), float(maxval)
+    if minval_f == maxval_f:
+        const = ov_opset.broadcast(_const(minval_f, ov_dtype), shape_ov).output(
+            0
+        )
+        return OpenVINOKerasTensor(const)
+    minval_c = _const(minval_f, ov_dtype)
+    maxval_c = _const(maxval_f, ov_dtype)
+    result = _random_uniform(
+        shape_ov, minval_c, maxval_c, ov_dtype, int(seed1), int(seed2)
+    )
+    if ov_dtype != Type.f32:
+        result = ov_opset.convert(result, ov_dtype).output(0)
+    return OpenVINOKerasTensor(result)
 
 
 def categorical(logits, num_samples, dtype="int64", seed=None):
@@ -161,14 +155,9 @@ def randint(shape, minval, maxval, dtype="int32", seed=None):
         gen_dtype = Type.i64
     else:
         gen_dtype = Type.i32
-    if isinstance(shape, (list, tuple)):
-        shape = ov_opset.constant(list(shape), Type.i32).output(0)
-    elif isinstance(shape, OpenVINOKerasTensor):
-        shape = shape.output
-    elif isinstance(shape, int):
-        shape = ov_opset.constant([shape], Type.i32).output(0)
-    else:
-        shape = get_ov_output(shape, Type.i32)
+    if isinstance(shape, int):
+        shape = [shape]
+    shape = shape_to_ov_output(list(shape))
     minval = get_ov_output(minval, gen_dtype)
     maxval = get_ov_output(maxval, gen_dtype)
     if minval.get_element_type() != gen_dtype:
@@ -185,29 +174,27 @@ def randint(shape, minval, maxval, dtype="int32", seed=None):
 
 def truncated_normal(shape, mean=0.0, stddev=1.0, dtype=None, seed=None):
     dtype = dtype or floatx()
-    seed = draw_seed(seed)
-    rng = _rng_from_seed_data(seed.data)
-
-    lower_bound = mean - 2 * stddev
-    upper_bound = mean + 2 * stddev
-
-    flat_shape = np.prod(shape)
-    random_numbers = np.empty(0)
-
-    # loop until we have enough valid numbers to fill our desired shape
-    while random_numbers.shape[0] < flat_shape:
-        # Generate a batch of random numbers from a normal distribution
-        batch = rng.normal(loc=mean, scale=stddev, size=flat_shape)
-
-        # Filter the numbers to keep only those within the specified bounds
-        valid = batch[(batch >= lower_bound) & (batch <= upper_bound)]
-
-        # Append the valid numbers to the result array
-        random_numbers = np.append(random_numbers, valid)
-
-    # Truncate the result array to the desired size and reshape it
-    np_array_res = random_numbers[:flat_shape].astype(dtype).reshape(shape)
-    return OpenVINOKerasTensor(_np_to_ov_const(np_array_res))
+    ov_dtype = OPENVINO_DTYPES[dtype]
+    seed_val = draw_seed(seed)
+    if isinstance(seed_val, OpenVINOKerasTensor):
+        seed1, seed2 = convert_to_numpy(seed_val)
+    else:
+        seed1, seed2 = seed_val.data
+    seed1, seed2 = int(seed1), int(seed2)
+    shape_ov = shape_to_ov_output(
+        list(shape) if not isinstance(shape, int) else [shape]
+    )
+    mean_c = _const(float(mean), ov_dtype)
+    stddev_c = _const(float(stddev), ov_dtype)
+    # Generate candidates and clamp to [mean-2*stddev, mean+2*stddev]
+    z = _random_normal(shape_ov, ov_dtype, seed1, seed2)
+    result = ov_opset.add(ov_opset.multiply(z, stddev_c), mean_c).output(0)
+    result = ov_opset.clamp(
+        result, float(mean - 2 * stddev), float(mean + 2 * stddev)
+    ).output(0)
+    if ov_dtype != OPENVINO_DTYPES[floatx()]:
+        result = ov_opset.convert(result, ov_dtype).output(0)
+    return OpenVINOKerasTensor(result)
 
 
 def dropout(inputs, rate, noise_shape=None, seed=None):
@@ -346,12 +333,9 @@ def gamma(shape, alpha, dtype=None, seed=None):
         seed1, seed2 = seed_val.data
     seed1 = int(seed1)
     seed2 = int(seed2)
-    if isinstance(shape, (list, tuple)):
-        shape = ov_opset.constant(list(shape), Type.i32).output(0)
-    elif isinstance(shape, OpenVINOKerasTensor):
-        shape = shape.output
-    else:
-        shape = get_ov_output(shape, Type.i32)
+    if isinstance(shape, int):
+        shape = [shape]
+    shape = shape_to_ov_output(list(shape))
     alpha = get_ov_output(alpha, ov_dtype)
     one = _const(1.0, ov_dtype)
     one_third = _const(1.0 / 3.0, ov_dtype)
@@ -425,12 +409,9 @@ def binomial(shape, counts, probabilities, dtype=None, seed=None):
     calc_dtype = Type.f32
     counts_f = ov_opset.convert(counts, calc_dtype).output(0)
     probs_f = ov_opset.convert(probabilities, calc_dtype).output(0)
-    if isinstance(shape, (list, tuple)):
-        shape_tensor = ov_opset.constant(list(shape), Type.i32).output(0)
-    elif isinstance(shape, OpenVINOKerasTensor):
-        shape_tensor = shape.output
-    else:
-        shape_tensor = get_ov_output(shape, Type.i32)
+    if isinstance(shape, int):
+        shape = [shape]
+    shape_tensor = shape_to_ov_output(list(shape))
     zero = ov_opset.constant(0.0, calc_dtype).output(0)
     one = ov_opset.constant(1.0, calc_dtype).output(0)
     u1 = _random_uniform(shape_tensor, zero, one, calc_dtype, seed1, seed2)

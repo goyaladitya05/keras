@@ -1388,10 +1388,6 @@ def svd(x, full_matrices=True, compute_uv=True):
     x_ov = get_ov_output(x)
     orig_type = x_ov.get_element_type()
 
-    # Work in f32:
-    #   f64 — Loop/constant-folding paths are less stable in this backend
-    #   f16/bf16 — iterative QR updates lose too much precision
-    #   complex/other — SVD path here is real-valued only
     if orig_type != Type.f32:
         x_ov = ov_opset.convert(x_ov, Type.f32).output(0)
     work_type = Type.f32
@@ -1432,10 +1428,6 @@ def svd(x, full_matrices=True, compute_uv=True):
 
     x_t = ov_opset.transpose(x_ov, transpose_axes).output(0)
 
-    # Always iterate on X^T@X (N×N gram matrix).
-    # q_curr accumulates the full N×N orthogonal V.  This lets us:
-    #   - safely transpose q_curr (matmul accumulation, not QR output)
-    #   - directly use QR Q (no transpose) to extend U for full_matrices=True
     b_curr = ov_opset.matmul(x_t, x_ov, False, False).output(0)
     eye_iter = ov_opset.one_hot(
         ov_opset.range(zero_s, n_s, one_s, output_type=Type.i32).output(0),
@@ -1491,7 +1483,6 @@ def svd(x, full_matrices=True, compute_uv=True):
         inv_s, ov_opset.constant([-2], Type.i32).output(0)
     ).output(0)
 
-    # q_curr is N×N; gather top-k columns → v_reduced [*batch, N, k]
     gather_shape = ov_opset.concat([batch_shape, n_1d, k_1d], 0).output(0)
     indices = ov_opset.broadcast(
         ov_opset.unsqueeze(
@@ -1506,9 +1497,6 @@ def svd(x, full_matrices=True, compute_uv=True):
     vh_reduced = ov_opset.transpose(v_reduced, transpose_axes).output(0)
 
     if full_matrices:
-        # q_curr is always N×N orthogonal (V).
-        # Vh [*batch, N, N]: reorder q_curr columns then transpose.
-        # Transposing a matmul-accumulation is safe (no OpenVINO CPU bug).
         rest_v = ov_opset.range(k_s, n_s, one_s, output_type=Type.i32).output(0)
         if rank > 2:
             rest_v = ov_opset.unsqueeze(
@@ -1541,22 +1529,17 @@ def svd(x, full_matrices=True, compute_uv=True):
             and static_m <= static_n
         )
         if m_le_n:
-            # M<=N: u_reduced is already M×k=M×M (k=M), no extension needed.
             u_out = u_reduced
         else:
-            # M>N: u_reduced is M×N; extend to M×M via Gram-Schmidt.
-            # Using QR here triggers an OpenVINO CPU shape bug when the
-            # input graph is deep (32+ chained Loop nodes from QR iteration).
-            # Gram-Schmidt uses only matmul ops so it is safe.
-            # static_m and static_n are both known here (m_le_n check above).
-            n_extra = static_m - static_n  # number of new columns needed
+            # Extend u_reduced [M×N] to [M×M] via Gram-Schmidt.
+            # QR-based extension triggers an OpenVINO CPU bug on deep graphs.
+            n_extra = static_m - static_n
             eps_gs = ov_opset.constant(1e-10, work_type).output(0)
-            u_cols = u_reduced  # [*batch, M, N] — grows to [*batch, M, M]
+            u_cols = u_reduced
             added = 0
             for i in range(static_m):
                 if added >= n_extra:
                     break
-                # candidate = e_i [*batch, M, 1]
                 ei_idx = ov_opset.constant([i], Type.i32).output(0)
                 ei = ov_opset.one_hot(
                     ei_idx,
@@ -1564,7 +1547,7 @@ def svd(x, full_matrices=True, compute_uv=True):
                     ov_opset.constant(1.0, work_type),
                     ov_opset.constant(0.0, work_type),
                     axis=-1,
-                ).output(0)  # [1, M]
+                ).output(0)
                 if rank > 2:
                     ei = ov_opset.broadcast(
                         ei,
@@ -1578,14 +1561,13 @@ def svd(x, full_matrices=True, compute_uv=True):
                             ],
                             0,
                         ).output(0),
-                    ).output(0)  # [*batch, 1, M]
+                    ).output(0)
                 ei_col = ov_opset.transpose(
                     ei,
                     ov_opset.constant(
                         list(range(rank - 2)) + [rank - 1, rank - 2], Type.i32
                     ).output(0),
-                ).output(0)  # [*batch, M, 1]
-                # c = ei - u_cols @ (u_cols^T @ ei)  [Gram-Schmidt]
+                ).output(0)
                 coeff = ov_opset.matmul(u_cols, ei_col, True, False).output(0)
                 proj = ov_opset.matmul(u_cols, coeff, False, False).output(0)
                 c = ov_opset.subtract(ei_col, proj).output(0)

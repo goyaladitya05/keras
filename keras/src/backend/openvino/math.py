@@ -2,6 +2,7 @@ import numpy as np
 import openvino.opset15 as ov_opset
 import scipy.signal
 from openvino import Type
+from openvino.opset16 import segment_max as ov_segment_max
 
 from keras.src.backend.openvino.core import OpenVINOKerasTensor
 from keras.src.backend.openvino.core import cast
@@ -105,7 +106,19 @@ def segment_sum(data, segment_ids, num_segments=None, sorted=False):
 
 
 def segment_max(data, segment_ids, num_segments=None, sorted=False):
-    return _segment_reduction_fn(data, segment_ids, "max", num_segments, sorted)
+    data = get_ov_output(data)
+    segment_ids = get_ov_output(segment_ids)
+    num_segments_node = (
+        None
+        if num_segments is None
+        else ov_opset.constant(
+            num_segments, segment_ids.get_element_type()
+        ).output(0)
+    )
+    result = ov_segment_max(
+        data, segment_ids, num_segments_node, fill_mode="LOWEST"
+    ).output(0)
+    return OpenVINOKerasTensor(result)
 
 
 def top_k(x, k, sorted=True):

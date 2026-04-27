@@ -901,7 +901,7 @@ class MathOpsCorrectnessTest(testing.TestCase):
             window=window,
             center=center,
         )
-        if backend.backend() in ("numpy", "jax", "torch"):
+        if backend.backend() in ("numpy", "jax", "torch", "openvino"):
             # these backends have different implementation for the boundary of
             # the output, so we need to truncate 5% before assertAllClose
             truncated_len = int(output.shape[-1] * 0.05)
@@ -933,7 +933,7 @@ class MathOpsCorrectnessTest(testing.TestCase):
             window=window,
             center=center,
         )
-        if backend.backend() in ("numpy", "jax", "torch"):
+        if backend.backend() in ("numpy", "jax", "torch", "openvino"):
             # these backends have different implementation for the boundary of
             # the output, so we need to truncate 5% before assertAllClose
             truncated_len = int(output.shape[-1] * 0.05)

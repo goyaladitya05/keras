@@ -2,6 +2,7 @@ import numpy as np
 import openvino.opset15 as ov_opset
 import scipy.signal
 from openvino import Type
+from openvino.opset16 import istft as ov_istft
 from openvino.opset16 import segment_max as ov_segment_max
 
 from keras.src.backend.openvino.core import OpenVINOKerasTensor
@@ -624,134 +625,198 @@ def istft(
 
     ori_dtype = x[0].dtype
 
-    x0 = get_ov_output(x[0])
-    ori_partial_shape = x0.get_partial_shape()
-    num_dims = ori_partial_shape.rank.get_length()
-    ori_shape_list = [
-        None if dim.is_dynamic else dim.get_length()
-        for dim in ori_partial_shape
-    ]
+    if window is None:
+        # ov_istft always applies OLA normalization via window, so the
+        # unnormalized window=None case uses the manual irfft + OLA path,
+        # matching TF and Torch backend.
+        frames = irfft(x, fft_length)
+        frames = get_ov_output(frames)
 
-    l_pad = (fft_length - sequence_length) // 2
-    r_pad = fft_length - sequence_length - l_pad
+        element_type = frames.get_element_type()
+        if element_type == Type.f64:
+            frames = ov_opset.convert(frames, Type.f32).output(0)
 
-    if window is not None:
-        if isinstance(window, str):
-            win = scipy.signal.get_window(window, sequence_length)
-        else:
-            win = np.asarray(window, dtype=np.float64)
-        if len(win.shape) != 1 or win.shape[-1] != sequence_length:
-            raise ValueError(
-                "The shape of `window` must be equal to [sequence_length]."
-                f"Received: window shape={win.shape}"
+        ori_partial_shape = frames.get_partial_shape()
+        num_dims = ori_partial_shape.rank.get_length()
+        ori_shape_list = [
+            None if dim.is_dynamic else dim.get_length()
+            for dim in ori_partial_shape
+        ]
+
+        if num_dims == 2:
+            frames = ov_opset.unsqueeze(
+                frames, ov_opset.constant(0, Type.i32)
+            ).output(0)
+        elif num_dims > 2:
+            frames_shp = ov_opset.shape_of(frames, output_type=Type.i32).output(
+                0
             )
-        win = np.pad(win, [[l_pad, r_pad]])
+            num_seq_node = ov_opset.gather(
+                frames_shp,
+                ov_opset.constant(num_dims - 2, Type.i32),
+                ov_opset.constant(0, Type.i32),
+            ).output(0)
+            flatten_shp = ov_opset.concat(
+                [
+                    ov_opset.constant([-1], Type.i32).output(0),
+                    ov_opset.unsqueeze(
+                        num_seq_node, ov_opset.constant(0, Type.i32)
+                    ).output(0),
+                    ov_opset.constant([fft_length], Type.i32).output(0),
+                ],
+                0,
+            ).output(0)
+            frames = ov_opset.reshape(frames, flatten_shp, False).output(0)
 
-        denom = np.square(win)
-        overlaps = -(-fft_length // sequence_stride)
-        denom = np.pad(denom, [(0, overlaps * sequence_stride - fft_length)])
-        denom = denom.reshape([overlaps, sequence_stride])
-        denom = denom.sum(axis=0, keepdims=True)
-        denom = np.tile(denom, [overlaps, 1])
-        denom = denom.reshape([overlaps * sequence_stride])
-        win = win / denom[:fft_length]
-    else:
-        win = None
+        frames, _ = _overlap_sequences_ov(frames, sequence_stride, fft_length)
 
-    frames = irfft(x, fft_length)
-    frames = get_ov_output(frames)
-
-    element_type = frames.get_element_type()
-    if element_type == Type.f64:
-        frames = ov_opset.convert(frames, Type.f32).output(0)
-        element_type = Type.f32
-
-    if win is not None:
-        win_node = ov_opset.constant(win.astype(np.float32), Type.f32).output(0)
-        if element_type != Type.f32:
-            win_node = ov_opset.convert(win_node, element_type).output(0)
-        frames = ov_opset.multiply(frames, win_node).output(0)
-
-    if num_dims == 2:
-        frames = ov_opset.unsqueeze(
-            frames, ov_opset.constant(0, Type.i32)
-        ).output(0)
-    elif num_dims > 2:
-        frames_shp = ov_opset.shape_of(frames, output_type=Type.i32).output(0)
-        num_seq_node = ov_opset.gather(
-            frames_shp,
-            ov_opset.constant(num_dims - 2, Type.i32),
-            ov_opset.constant(0, Type.i32),
-        ).output(0)
-        flatten_shp = ov_opset.concat(
-            [
-                ov_opset.constant([-1], Type.i32).output(0),
-                ov_opset.unsqueeze(
-                    num_seq_node, ov_opset.constant(0, Type.i32)
-                ).output(0),
-                ov_opset.constant([fft_length], Type.i32).output(0),
-            ],
-            0,
-        ).output(0)
-        frames = ov_opset.reshape(frames, flatten_shp, False).output(0)
-
-    frames, output_size = _overlap_sequences_ov(
-        frames, sequence_stride, fft_length
-    )
-
-    start_val = fft_length // 2 if center else 0
-
-    if length is not None:
-        frames = ov_opset.slice(
-            frames,
-            ov_opset.constant([start_val], Type.i32).output(0),
-            ov_opset.constant([start_val + length], Type.i32).output(0),
-            ov_opset.constant([1], Type.i32).output(0),
-            ov_opset.constant([1], Type.i32).output(0),
-        ).output(0)
-    else:
-        if start_val > 0:
+        start_val = fft_length // 2 if center else 0
+        if length is not None:
             frames = ov_opset.slice(
                 frames,
                 ov_opset.constant([start_val], Type.i32).output(0),
-                ov_opset.constant([INT32_MAX], Type.i32).output(0),
+                ov_opset.constant([start_val + length], Type.i32).output(0),
                 ov_opset.constant([1], Type.i32).output(0),
                 ov_opset.constant([1], Type.i32).output(0),
             ).output(0)
-        if center:
-            cur_len = ov_opset.gather(
-                ov_opset.shape_of(frames, output_type=Type.i32).output(0),
-                ov_opset.constant(1, Type.i32),
-                ov_opset.constant(0, Type.i32),
+        else:
+            if start_val > 0:
+                frames = ov_opset.slice(
+                    frames,
+                    ov_opset.constant([start_val], Type.i32).output(0),
+                    ov_opset.constant([INT32_MAX], Type.i32).output(0),
+                    ov_opset.constant([1], Type.i32).output(0),
+                    ov_opset.constant([1], Type.i32).output(0),
+                ).output(0)
+            if center:
+                cur_len = ov_opset.gather(
+                    ov_opset.shape_of(frames, output_type=Type.i32).output(0),
+                    ov_opset.constant(1, Type.i32),
+                    ov_opset.constant(0, Type.i32),
+                ).output(0)
+                end_node = ov_opset.subtract(
+                    cur_len,
+                    ov_opset.constant(fft_length // 2, Type.i32),
+                ).output(0)
+                frames = ov_opset.slice(
+                    frames,
+                    ov_opset.constant([0], Type.i32).output(0),
+                    ov_opset.unsqueeze(
+                        end_node, ov_opset.constant(0, Type.i32)
+                    ).output(0),
+                    ov_opset.constant([1], Type.i32).output(0),
+                    ov_opset.constant([1], Type.i32).output(0),
+                ).output(0)
+
+        if num_dims == 2:
+            frames = ov_opset.squeeze(
+                frames, ov_opset.constant([0], Type.i32)
             ).output(0)
-            end_node = ov_opset.subtract(
-                cur_len,
-                ov_opset.constant(fft_length // 2, Type.i32),
-            ).output(0)
-            frames = ov_opset.slice(
+        elif num_dims > 2:
+            batch_dims = ori_shape_list[:-2]
+            target_shape = [d if d is not None else -1 for d in batch_dims] + [
+                -1
+            ]
+            frames = ov_opset.reshape(
                 frames,
-                ov_opset.constant([0], Type.i32).output(0),
-                ov_opset.unsqueeze(
-                    end_node, ov_opset.constant(0, Type.i32)
-                ).output(0),
-                ov_opset.constant([1], Type.i32).output(0),
-                ov_opset.constant([1], Type.i32).output(0),
+                ov_opset.constant(target_shape, Type.i32).output(0),
+                False,
             ).output(0)
 
-    if num_dims == 2:
-        frames = ov_opset.squeeze(
-            frames, ov_opset.constant([0], Type.i32)
+        if ori_dtype == "float64":
+            frames = ov_opset.convert(frames, Type.f64).output(0)
+
+        return OpenVINOKerasTensor(frames)
+
+    if isinstance(window, str):
+        win = scipy.signal.get_window(window, sequence_length)
+    else:
+        win = np.asarray(window, dtype=np.float64)
+    if len(win.shape) != 1 or win.shape[-1] != sequence_length:
+        raise ValueError(
+            "The shape of `window` must be equal to [sequence_length]."
+            f"Received: window shape={win.shape}"
+        )
+
+    x_real = get_ov_output(x[0])
+    x_imag = get_ov_output(x[1])
+
+    element_type = x_real.get_element_type()
+    if element_type == Type.f64:
+        x_real = ov_opset.convert(x_real, Type.f32).output(0)
+        x_imag = ov_opset.convert(x_imag, Type.f32).output(0)
+
+    real_exp = ov_opset.unsqueeze(
+        x_real, ov_opset.constant(-1, Type.i32)
+    ).output(0)
+    imag_exp = ov_opset.unsqueeze(
+        x_imag, ov_opset.constant(-1, Type.i32)
+    ).output(0)
+    stacked = ov_opset.concat([real_exp, imag_exp], axis=-1).output(0)
+
+    rank = stacked.get_partial_shape().rank.get_length()
+    perm = list(range(rank - 3)) + [rank - 2, rank - 3, rank - 1]
+    data = ov_opset.transpose(
+        stacked, ov_opset.constant(perm, Type.i32)
+    ).output(0)
+
+    # ov_istft only accepts rank 3 or 4; flatten leading batch dims if needed
+    num_batch_dims = rank - 3
+    if num_batch_dims > 1:
+        data_shape_node = ov_opset.shape_of(data, output_type=Type.i32).output(
+            0
+        )
+        trailing = ov_opset.slice(
+            data_shape_node,
+            ov_opset.constant([num_batch_dims], Type.i32),
+            ov_opset.constant([INT32_MAX], Type.i32),
+            ov_opset.constant([1], Type.i32),
+            ov_opset.constant([0], Type.i32),
         ).output(0)
-    elif num_dims > 2:
-        batch_dims = ori_shape_list[:-2]
-        target_shape = [d if d is not None else -1 for d in batch_dims] + [-1]
-        target_shape_node = ov_opset.constant(target_shape, Type.i32).output(0)
-        frames = ov_opset.reshape(frames, target_shape_node, False).output(0)
+        data = ov_opset.reshape(
+            data,
+            ov_opset.concat(
+                [ov_opset.constant([-1], Type.i32).output(0), trailing], axis=0
+            ).output(0),
+            False,
+        ).output(0)
+
+    win_node = ov_opset.constant(win.astype(np.float32), Type.f32).output(0)
+    frame_size_node = ov_opset.constant(fft_length, Type.i32).output(0)
+    frame_step_node = ov_opset.constant(sequence_stride, Type.i32).output(0)
+    signal_length_node = (
+        ov_opset.constant(length, Type.i32).output(0)
+        if length is not None
+        else None
+    )
+
+    result = ov_istft(
+        data,
+        win_node,
+        frame_size_node,
+        frame_step_node,
+        center=center,
+        normalized=False,
+        signal_length=signal_length_node,
+    ).output(0)
+
+    if num_batch_dims > 1:
+        ori_partial_shape = x_real.get_partial_shape()
+        batch_shape = [
+            None if dim.is_dynamic else dim.get_length()
+            for dim in ori_partial_shape
+        ][:-2]
+        target_shape = [d if d is not None else -1 for d in batch_shape] + [-1]
+        result = ov_opset.reshape(
+            result,
+            ov_opset.constant(target_shape, Type.i32).output(0),
+            False,
+        ).output(0)
 
     if ori_dtype == "float64":
-        frames = ov_opset.convert(frames, Type.f64).output(0)
+        result = ov_opset.convert(result, Type.f64).output(0)
 
-    return OpenVINOKerasTensor(frames)
+    return OpenVINOKerasTensor(result)
 
 
 def rsqrt(x):

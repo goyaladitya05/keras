@@ -622,6 +622,13 @@ def istft(
                 "If a string is passed to `window`, it must be one of "
                 f'`"hann"`, `"hamming"`. Received: window={window}'
             )
+    elif window is not None:
+        win = np.asarray(window, dtype=np.float64)
+        if len(win.shape) != 1 or win.shape[-1] != sequence_length:
+            raise ValueError(
+                "The shape of `window` must be equal to [sequence_length]."
+                f"Received: window shape={win.shape}"
+            )
 
     ori_dtype = x[0].dtype
 
@@ -732,11 +739,6 @@ def istft(
         win = scipy.signal.get_window(window, sequence_length)
     else:
         win = np.asarray(window, dtype=np.float64)
-    if len(win.shape) != 1 or win.shape[-1] != sequence_length:
-        raise ValueError(
-            "The shape of `window` must be equal to [sequence_length]."
-            f"Received: window shape={win.shape}"
-        )
 
     x_real = get_ov_output(x[0])
     x_imag = get_ov_output(x[1])

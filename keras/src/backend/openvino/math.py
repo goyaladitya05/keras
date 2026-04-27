@@ -90,16 +90,48 @@ def segment_sum(data, segment_ids, num_segments=None, sorted=False):
 def segment_max(data, segment_ids, num_segments=None, sorted=False):
     data = get_ov_output(data)
     segment_ids = get_ov_output(segment_ids)
-    num_segments_node = (
-        None
-        if num_segments is None
-        else ov_opset.constant(
+
+    zero = ov_opset.constant(0, Type.i32).output(0)
+    zero_1d = ov_opset.constant([0], Type.i32).output(0)
+    one_1d = ov_opset.constant([1], Type.i32).output(0)
+
+    if num_segments is None:
+        max_id = ov_opset.reduce_max(
+            segment_ids, zero_1d, keep_dims=False
+        ).output(0)
+        num_segments = ov_opset.add(
+            max_id, ov_opset.constant(1, max_id.get_element_type())
+        ).output(0)
+    else:
+        num_segments = ov_opset.constant(
             num_segments, segment_ids.get_element_type()
         ).output(0)
-    )
-    result = ov_segment_max(
-        data, segment_ids, num_segments_node, fill_mode="LOWEST"
+
+    is_neg = ov_opset.less(
+        segment_ids,
+        ov_opset.constant(0, segment_ids.get_element_type()),
     ).output(0)
+    safe_seg = ov_opset.select(is_neg, num_segments, segment_ids).output(0)
+
+    # ov_segment_max requires sorted segment_ids.
+    n = ov_opset.squeeze(
+        ov_opset.shape_of(safe_seg, output_type=Type.i32), zero_1d
+    ).output(0)
+    topk = ov_opset.topk(safe_seg, n, axis=0, mode="min", sort="value")
+    sorted_seg = topk.output(0)
+    sort_idx = topk.output(1)
+    sorted_data = ov_opset.gather(data, sort_idx, zero).output(0)
+
+    nseg_plus1 = ov_opset.add(
+        num_segments, ov_opset.constant(1, num_segments.get_element_type())
+    ).output(0)
+    result = ov_segment_max(
+        sorted_data, sorted_seg, nseg_plus1, fill_mode="LOWEST"
+    ).output(0)
+
+    nseg_1d = ov_opset.unsqueeze(num_segments, zero).output(0)
+    result = ov_opset.slice(result, zero_1d, nseg_1d, one_1d, zero_1d).output(0)
+
     return OpenVINOKerasTensor(result)
 
 

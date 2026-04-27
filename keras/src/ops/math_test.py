@@ -517,7 +517,7 @@ class MathOpsCorrectnessTest(testing.TestCase):
             num_segments = np.max(segment_ids).item() + 1
         expected_shape = (num_segments,) + data_dims
         if segment_reduce_op == kmath.segment_max:
-            if backend.backend() == "tensorflow":
+            if backend.backend() in ("tensorflow", "openvino"):
                 empty_fill_value = -np.finfo(np.float32).max
             else:
                 empty_fill_value = -np.inf

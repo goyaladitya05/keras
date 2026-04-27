@@ -13,9 +13,7 @@ from keras.src.backend.openvino.numpy import stack
 INT32_MAX = 2**31 - 1
 
 
-def _segment_reduction_fn(
-    data, segment_ids, reduction_method, num_segments, sorted
-):
+def segment_sum(data, segment_ids, num_segments=None, sorted=False):
     data = get_ov_output(data)
     segment_ids = get_ov_output(segment_ids)
 
@@ -70,24 +68,11 @@ def _segment_reduction_fn(
             num_segments_plus_1, ov_opset.constant(0, Type.i32)
         ).output(0)
 
-    if reduction_method == "max":
-        from keras.src.backend.openvino.core import DTYPES_MIN
-
-        data_type = data.get_element_type()
-        if data_type.is_real():
-            init_val = np.array(-np.inf, dtype=np.float32)
-        else:
-            init_val = DTYPES_MIN[data_type]
-    else:
-        init_val = 0
-
-    init_val_node = ov_opset.constant(init_val, data.get_element_type()).output(
-        0
-    )
+    init_val_node = ov_opset.constant(0, data.get_element_type()).output(0)
     buffer = ov_opset.broadcast(init_val_node, buffer_shape).output(0)
 
     scattered = ov_opset.scatter_nd_update(
-        buffer, indices, data, reduction=reduction_method
+        buffer, indices, data, reduction="sum"
     ).output(0)
 
     start = ov_opset.constant([0], Type.i32).output(0)
@@ -99,10 +84,6 @@ def _segment_reduction_fn(
     result = ov_opset.slice(scattered, start, end, step, axes).output(0)
 
     return OpenVINOKerasTensor(result)
-
-
-def segment_sum(data, segment_ids, num_segments=None, sorted=False):
-    return _segment_reduction_fn(data, segment_ids, "sum", num_segments, sorted)
 
 
 def segment_max(data, segment_ids, num_segments=None, sorted=False):

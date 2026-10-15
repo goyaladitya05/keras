@@ -17,7 +17,7 @@ _BACKEND = "tensorflow"
 
 BUILT_IN_BACKENDS = frozenset(["jax", "numpy", "tensorflow", "torch"])
 
-PLUGGABLE_BACKENDS = frozenset(["mlx", "openvino", "paddle"])
+PLUGGABLE_BACKENDS = frozenset(["mlx", "openvino", "paddle", "tensorrt"])
 
 # Whether NNX is enabled.
 _NNX_ENABLED = False
